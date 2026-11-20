@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="pl" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FTS & PZST DanceSport Intelligence Suite — Analityka Par, Turniejów i Sędziów</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            obsidian: '#0B0F19',
+            slateCard: '#111827',
+            slateElevated: '#1F2937',
+            goldAccent: '#F59E0B',
+            indigoAccent: '#6366F1',
+          }
+        }
+      }
+    };
+  </script>
+  <style>
+    body {
+      background-color: #0B0F19;
+      color: #F9FAFB;
+      font-family: 'Inter', sans-serif;
+    }
+    .mono-num {
+      font-family: 'JetBrains Mono', monospace;
+      font-variant-numeric: tabular-nums;
+    }
+    .glass-card {
+      background: rgba(17, 24, 39, 0.88);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(55, 65, 81, 0.65);
+    }
+    .nav-btn {
+      transition: all 0.18s ease;
+      border-left: 3px solid transparent;
+    }
+    .nav-btn.active {
+      background: linear-gradient(90deg, rgba(245, 158, 11, 0.18), rgba(99, 102, 241, 0.08));
+      border-left-color: #F59E0B;
+      color: #FBBF24;
+    }
+    .judge-pill.active {
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.25), rgba(99, 102, 241, 0.2));
+      border-color: #F59E0B;
+      color: #FDE68A;
+    }
+    ::-webkit-scrollbar {
+      width: 7px;
+      height: 7px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0B0F19;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #374151;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #4B5563;
+    }
+  </style>
+</head>
+<body class="h-screen overflow-hidden flex bg-obsidian text-gray-100">
+
+  <!-- ==================== LEFT SIDEBAR MENU ==================== -->
+  <aside id="appSidebar" class="w-72 bg-slateCard/95 border-r border-gray-800 flex flex-col justify-between shrink-0 z-30">
+    <div>
+      <!-- Brand Header -->
+      <div class="p-5 border-b border-gray-800 flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-amber-500/20 font-extrabold text-obsidian text-base shrink-0">
+          FTS
+        </div>
+        <div class="min-w-0">
+          <div class="flex items-center gap-1.5">
+            <h1 class="font-bold text-sm tracking-tight text-white truncate">DanceSport Intelligence</h1>
+            <span class="px-1.5 py-0.5 text-[10px] font-mono uppercase rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">PRO</span>
+          </div>
+          <p class="text-[11px] text-gray-400 truncate">System Analityki FTS & PZST</p>
+        </div>
+      </div>
+
+      <!-- Navigation Menu Groups -->
+      <nav class="p-3 space-y-5 overflow-y-auto max-h-[calc(100vh-170px)]">
+        <div>
+          <div class="px-3 mb-1.5 text-[10px] font-mono uppercase tracking-wider text-gray-500">Główne Moduły</div>
+          <div class="space-y-1">
+            <button onclick="switchTab('overview')" id="tabBtn-overview" class="nav-btn active w-full flex items-center gap-3 px-3 py-2.5 rounded-r-xl text-xs font-semibold text-gray-300 hover:text-white hover:bg-gray-800/50 text-left">
+              <svg class="w-4 h-4 shrink-0 text-amber-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+              <div>
+                <div>Pulpit & Architektura</div>
+                <div class="text-[10px] font-normal text-gray-400">Rankingi par, klubów i źródła danych</div>
+              </div>
+            </button>
+
+            <button onclick="switchTab('couples')" id="tabBtn-couples" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-r-xl text-xs font-semibold text-gray-300 hover:text-white hover:bg-gray-800/50 text-left">
+              <svg class="w-4 h-4 shrink-0 text-indigo-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+              <div>
+                <div>Analityka Pary & Oceny Sędziów</div>
+                <div class="text-[10px] font-normal text-gray-400">Wykresy formy, tańce i historia sędziów</div>
+              </div>
+            </button>
+
+            <button onclick="switchTab('dancers')" id="tabBtn-dancers" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-r-xl text-xs font-semibold text-gray-300 hover:text-white hover:bg-gray-800/50 text-left">
+              <svg class="w-4 h-4 shrink-0 text-emerald-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+              <div>
+                <div>Tancerz & Zmiany Partnerów</div>
+                <div class="text-[10px] font-normal text-gray-400">Unikalny ID, oś partnerstw i kariera</div>
+              </div>
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <div class="px-3 mb-1.5 text-[10px] font-mono uppercase tracking-wider text-gray-500">Narzędzia Porównawcze & Turnieje</div>
+          <div class="space-y-1">
+            <button onclick="switchTab('h2h')" id="tabBtn-h2h" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-r-xl text-xs font-semibold text-gray-300 hover:text-white hover:bg-gray-800/50 text-left">
+              <svg class="w-4 h-4 shrink-0 text-amber-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/></svg>
+              <div>
+                <div>Porównywarka Head-to-Head</div>
+                <div class="text-[10px] font-normal text-gray-400">Pojedynki bezpośrednie Para A vs B</div>
+              </div>
+            </button>
+
+            <button onclick="switchTab('tournaments')" id="tabBtn-tournaments" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-r-xl text-xs font-semibold text-gray-300 hover:text-white hover:bg-gray-800/50 text-left">
+              <svg class="w-4 h-4 shrink-0 text-indigo-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+              <div>
+                <div>Turnieje & Arkusze Skating</div>
+                <div class="text-[10px] font-normal text-gray-400">Wyszukiwarka klas, lokalizacji i finałów</div>
+              </div>
+            </button>
+
+            <button onclick="switchTab('judges')" id="tabBtn-judges" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-r-xl text-xs font-semibold text-gray-300 hover:text-white hover:bg-gray-800/50 text-left">
+              <svg class="w-4 h-4 shrink-0 text-emerald-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+              <div>
+                <div>Komisje Sędziowskie & Bias</div>
+                <div class="text-[10px] font-normal text-gray-400">Zgodność z panelem i przychylność</div>
+              </div>
+            </button>
+          </div>
+        </div>
+      </nav>
+    </div>
+
+    <!-- Bottom Sidebar Live Sync Control -->
+    <div class="p-4 border-t border-gray-800 bg-obsidian/60 space-y-2">
+      <button
+        id="syncLiveBtn"
+        onclick="triggerLiveFtsSync()"
+        class="w-full px-3 py-2.5 rounded-xl text-xs font-semibold bg-indigo-600/20 hover:bg-indigo-600/35 text-indigo-300 border border-indigo-500/40 transition flex items-center justify-center gap-2"
+        title="Pobierz najnowsze dane z API baza.polskitaniec.org / baza.fts-taniec.pl"
+      >
+        <span id="syncSpinner" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <span>Synchronizuj Bazy FTS/PZST</span>
+      </button>
+      <div class="text-[10px] text-gray-500 text-center font-mono">
+        Klucz pary: <span class="text-amber-400">ID_M_ID_K</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ==================== RIGHT WORKSPACE (TOPBAR + SCROLLABLE CONTENT) ==================== -->
+  <div class="flex-1 flex flex-col min-w-0 overflow-hidden">
+
+    <!-- Top Search & Breadcrumb Header -->
+    <header class="h-16 border-b border-gray-800 bg-obsidian/95 px-6 flex items-center justify-between gap-4 shrink-0 z-20">
+      <div class="flex items-center gap-3">
+        <span id="activeModuleBadge" class="px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30">
+          Pulpit & Architektura FTS
+        </span>
+      </div>
+
+      <!-- Quick Universal Omni-Search Bar -->
+      <div class="flex items-center gap-3 flex-1 max-w-2xl">
+        <div class="relative w-full">
+          <input
+            id="globalSearchInput"
+            type="text"
+            placeholder="Szukaj po wszystkim: nazwisko, para, 8-cyfrowy ID, klub, miasto, klasa, sędzia, turniej..."
+            class="w-full bg-slateCard border border-gray-700 focus:border-amber-500 rounded-xl px-4 py-2 text-xs text-gray-100 placeholder-gray-500 focus:outline-none"
+          />
+          <div id="globalSearchDropdown" class="hidden absolute left-0 right-0 mt-1.5 glass-card rounded-xl shadow-2xl max-h-96 overflow-y-auto z-50 divide-y divide-gray-800"></div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Scrollable Module Views -->
+    <main class="flex-1 overflow-y-auto p-6 space-y-6">
+
+      <!-- ==================== TAB 1: OVERVIEW & ARCHITECTURE ==================== -->
+      <section id="tabView-overview" class="space-y-6">
+        <div id="overviewKpiGrid" class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3"></div>
+
+        <!-- Technical Report Card on fts-taniec.pl Data Sources -->
+        <div class="glass-card rounded-2xl p-6 border border-amber-500/30">
+          <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-gray-800">
+            <div>
+              <span class="text-xs font-mono uppercase tracking-wider text-amber-400">Raport Inżynierii Danych • https://www.fts-taniec.pl/</span>
+              <h2 class="text-xl font-bold text-white mt-0.5">Jak i skąd ekosystem FTS / PZST pobiera dane turniejowe, numery tancerzy i noty sędziów?</h2>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <span class="px-2.5 py-1 rounded-lg text-xs font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">baza.polskitaniec.org (MarX JSON)</span>
+              <span class="px-2.5 py-1 rounded-lg text-xs font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">baza.fts-taniec.pl (MasterDance HTML)</span>
+              <span class="px-2.5 py-1 rounded-lg text-xs font-mono bg-amber-500/15 text-amber-300 border border-amber-500/30">Klucz Pary: maleDancerId_femaleDancerId</span>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4 text-xs text-gray-300 leading-relaxed">
+            <div class="bg-obsidian/70 p-4 rounded-xl border border-gray-800">
+              <h3 class="font-bold text-amber-400 text-sm mb-1.5">1. Architektura Iframe & Dwa Systemy Bazowe</h3>
+              <p>Strona główna <code class="text-amber-300">fts-taniec.pl</code> pełni rolę portalu CMS i osadza zewnętrzne systemy w <code class="text-indigo-300">&lt;iframe&gt;</code>:</p>
+              <ul class="list-disc list-inside mt-2 space-y-1 text-gray-400">
+                <li><strong class="text-gray-200">Kalendarz i Archiwum 2022–2026+:</strong> pobiera JSON z <code class="text-emerald-300">GET baza.polskitaniec.org/cal/archive</code>.</li>
+                <li><strong class="text-gray-200">Archiwum FTS 2015–2024:</strong> serwuje karty Bootstrap z <code class="text-indigo-300">baza.fts-taniec.pl/cal2/archive.php</code> (785 turniejów).</li>
+                <li><strong class="text-gray-200">Rankingi REST API:</strong> <code class="text-emerald-300">/api/ranking/details/...</code> zwraca historię startów i punkty.</li>
+              </ul>
+            </div>
+
+            <div class="bg-obsidian/70 p-4 rounded-xl border border-gray-800">
+              <h3 class="font-bold text-indigo-400 text-sm mb-1.5">2. Unikalne Numery Tancerzy (ID) i Definicja Pary</h3>
+              <p>Arkusze wyników LIVE zawierają jedynie numery startowe (<code class="text-indigo-300">StNo</code>) oraz nazwiska. Unikalne 8-cyfrowe numery licencji (<code class="text-amber-300">20xxxxxx</code>) oraz WDSF MIN (<code class="text-amber-300">10xxxxxx</code>) pobierane są z:</p>
+              <ul class="list-disc list-inside mt-2 space-y-1 text-gray-400">
+                <li>List startowych turnieju: <code class="text-emerald-300">/reg/&lt;id&gt;/list</code> oraz <code class="text-indigo-300">/x/reg/&lt;id&gt;/list</code>.</li>
+                <li>W naszej bazie każda para ma klucz <code class="text-amber-300">maleDancerId_femaleDancerId</code> (np. <code class="text-amber-300">20000030_20000172</code>). Zmiana partnera automatycznie tworzy nową parę z zachowaniem historii tancerza!</li>
+              </ul>
+            </div>
+
+            <div class="bg-obsidian/70 p-4 rounded-xl border border-gray-800">
+              <h3 class="font-bold text-emerald-400 text-sm mb-1.5">3. Wyniki LIVE, Krzyżyki (Recall) i Skating Finałowy</h3>
+              <p>Aplikacja obsługuje oba formaty publikacji szczegółowych ocen sędziowskich:</p>
+              <ul class="list-disc list-inside mt-2 space-y-1 text-gray-400">
+                <li><strong class="text-gray-200">MarX Results Viewer:</strong> <code class="text-emerald-300">timetable.json</code> + <code class="text-emerald-300">PZST_category_*.json</code> (zawiera mapowanie <code class="text-amber-300">adjudicator_&lt;id&gt;_pl</code>, typowania <code class="text-amber-300">dr.r1.mks</code> i skating <code class="text-amber-300">dr.F.skating</code>).</li>
+                <li><strong class="text-gray-200">MasterDance HTML:</strong> pliki <code class="text-indigo-300">&lt;NNN&gt;99.htm</code> (sędziowie), <code class="text-indigo-300">0000&lt;NNN&gt;X.htm</code> (noty) i <code class="text-indigo-300">0000&lt;NNN&gt;S.htm</code> (Skating).</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <!-- Top Couples & Top Clubs Leaderboard -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div class="lg:col-span-7 glass-card rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-4">
+              <div>
+                <h3 class="font-bold text-base text-white">Ranking Najlepszych Par (Unikalne Zestawienia ID_M + ID_K)</h3>
+                <p class="text-xs text-gray-400">Kliknij parę, aby otworzyć pełną analitykę wydajności, tańców i historii ocen od sędziów</p>
+              </div>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr class="border-b border-gray-800 text-gray-400 uppercase font-mono text-[11px]">
+                    <th class="py-2.5 px-2">Para & Unikalny Klucz ID</th>
+                    <th class="py-2.5 px-2">Klub</th>
+                    <th class="py-2.5 px-2">Kat. / Klasa</th>
+                    <th class="py-2.5 px-2 text-right">Starty</th>
+                    <th class="py-2.5 px-2 text-right">Śr. Miejsce</th>
+                    <th class="py-2.5 px-2 text-right">Zwycięstwa / Podium</th>
+                    <th class="py-2.5 px-2 text-right">Punkty</th>
+                  </tr>
+                </thead>
+                <tbody id="overviewTopCouplesBody" class="divide-y divide-gray-800/60"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="lg:col-span-5 glass-card rounded-2xl p-5 flex flex-col justify-between">
+            <div>
+              <h3 class="font-bold text-base text-white mb-1">Ranking Klubów Tanecznych FTS / PZST</h3>
+              <p class="text-xs text-gray-400 mb-4">Zestawienie punktów, podium i złotych medali według klubów</p>
+              <div class="h-64">
+                <canvas id="overviewClubsChart"></canvas>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 2: COUPLE DEEP ANALYTICS & JUDGE HISTORY DRILL-DOWN ==================== -->
+      <section id="tabView-couples" class="hidden space-y-6">
+        <!-- Couple Universal Search Bar (Replaces bulky dropdown!) -->
+        <div class="glass-card rounded-2xl p-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
+          <div class="flex items-center gap-3 flex-1">
+            <label class="text-xs font-mono uppercase text-amber-400 whitespace-nowrap">Wyszukaj Parę:</label>
+            <div class="relative w-full max-w-2xl">
+              <input
+                id="coupleSearchInput"
+                type="text"
+                placeholder="Wpisz nazwisko, 8-cyfrowy numer ID (np. 20000030), klub, miasto, klasę (np. S, A, B) lub kategorię..."
+                class="w-full bg-obsidian border border-gray-700 focus:border-amber-500 rounded-xl px-4 py-2 text-xs text-white placeholder-gray-500 focus:outline-none"
+              />
+              <div id="coupleSearchResults" class="hidden absolute left-0 right-0 mt-1.5 glass-card rounded-xl shadow-2xl max-h-80 overflow-y-auto z-40 divide-y divide-gray-800"></div>
+            </div>
+          </div>
+          <div id="coupleQuickPartnerLinks" class="flex flex-wrap items-center gap-2"></div>
+        </div>
+
+        <!-- Couple Header Banner & Summary Metrics -->
+        <div id="coupleHeaderBanner" class="glass-card rounded-2xl p-6"></div>
+
+        <!-- Related Partnerships Alert -->
+        <div id="coupleRelatedPartnershipsCard" class="glass-card rounded-2xl p-5 border border-indigo-500/30"></div>
+
+        <!-- Charts Row 1: Performance Trajectory & Per-Dance Radar -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div class="lg:col-span-8 glass-card rounded-2xl p-5">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
+              <div>
+                <h3 class="font-bold text-base text-white">Trajektoria Wydajności i Tendencja Formy Turniejowej</h3>
+                <p class="text-xs text-gray-400">Oś lewa: Zajęte miejsce (1 na górze) • Oś prawa: Percentyl pokonanych par w kategorii (%)</p>
+              </div>
+              <span id="coupleTrendBadge" class="px-3 py-1 rounded-full text-xs font-semibold"></span>
+            </div>
+            <div class="h-80">
+              <canvas id="coupleTrajectoryChart"></canvas>
+            </div>
+          </div>
+
+          <div class="lg:col-span-4 glass-card rounded-2xl p-5">
+            <h3 class="font-bold text-base text-white mb-1">Profil Siły w Poszczególnych Tańcach</h3>
+            <p class="text-xs text-gray-400 mb-4">Średnia ocena Skating w finale oraz % awansów z półfinału (Recall)</p>
+            <div class="h-64">
+              <canvas id="coupleDanceRadarChart"></canvas>
+            </div>
+            <div id="coupleDanceStatsList" class="mt-4 space-y-1.5 text-xs"></div>
+          </div>
+        </div>
+
+        <!-- ==================== NEW FEATURE: COUPLE -> JUDGES LIST & HISTORICAL TIMELINE DRILL-DOWN ==================== -->
+        <div class="glass-card rounded-2xl p-6 border border-amber-500/40 space-y-5">
+          <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-gray-800 pb-4">
+            <div>
+              <span class="text-xs font-mono uppercase text-amber-400">Dedykowany Moduł Sędziowski Pary</span>
+              <h3 class="text-lg font-bold text-white">Sędziowie Oceniający Tę Parę — Historia Ocen, Wykres Chronologiczny i Porównanie z Panelem</h3>
+              <p class="text-xs text-gray-400">Kliknij dowolnego sędziego z listy poniżej (lub wybierz z menu), aby zobaczyć wykres jak oceniał tę parę na kolejnych turniejach i w poszczególnych tańcach</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <label class="text-xs font-mono text-gray-400 whitespace-nowrap">Sędzia:</label>
+              <select
+                id="coupleSpecificJudgeDropdown"
+                onchange="loadCoupleJudgeHistory(window.currentCoupleKey, this.value)"
+                class="bg-obsidian border border-amber-500/50 rounded-xl px-3 py-2 text-xs text-white focus:outline-none"
+              ></select>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <!-- Left 5 cols: All Judges who ever judged this couple -->
+            <div class="lg:col-span-5 space-y-2">
+              <div class="text-xs font-mono uppercase text-gray-400 mb-1">Lista Wszystkich Sędziów tej Pary (Kliknij wiersz, aby zbadać historię):</div>
+              <div class="overflow-y-auto max-h-[420px] pr-1">
+                <table class="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr class="border-b border-gray-800 text-gray-400 uppercase font-mono text-[10px]">
+                      <th class="py-2 px-2">Sędzia</th>
+                      <th class="py-2 px-1.5 text-right">Tańce</th>
+                      <th class="py-2 px-1.5 text-right">Śr. Nota</th>
+                      <th class="py-2 px-1.5 text-right">Panel</th>
+                      <th class="py-2 px-1.5 text-right">Δ Bias</th>
+                    </tr>
+                  </thead>
+                  <tbody id="coupleJudgesTableBody" class="divide-y divide-gray-800/60"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Right 7 cols: Selected Judge Historical Timeline Chart & Dance-by-Dance Breakdown for this Couple -->
+            <div class="lg:col-span-7 bg-obsidian/75 rounded-2xl p-4 border border-gray-800 space-y-4">
+              <div id="coupleJudgeDrilldownHeader" class="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-gray-800"></div>
+
+              <!-- Chart 1: Chronological Judge Mark vs Panel Consensus & Final Place across Tournaments -->
+              <div>
+                <div class="text-xs font-semibold text-gray-200 mb-1">
+                  Wykres Chronologiczny: Średnia Nota Wybranego Sędziego vs Reszta Komisji (Turniej po Turnieju)
+                </div>
+                <div class="text-[11px] text-gray-400 mb-2">
+                  Oś odwrócona (1. miejsce na górze) — zobacz czy sędzia z czasem ocenia parę coraz lepiej, czy surowiej niż panel
+                </div>
+                <div class="h-56">
+                  <canvas id="coupleSingleJudgeHistoryChart"></canvas>
+                </div>
+              </div>
+
+              <!-- Chart 2 & Table: Per-Dance comparison for this judge vs panel -->
+              <div class="grid grid-cols-1 md:grid-cols-12 gap-4 pt-2 border-t border-gray-800/80">
+                <div class="md:col-span-5">
+                  <div class="text-xs font-semibold text-gray-200 mb-1">Średnia Nota Sędziego wg Tańca</div>
+                  <div class="h-44">
+                    <canvas id="coupleSingleJudgeDanceChart"></canvas>
+                  </div>
+                </div>
+                <div class="md:col-span-7">
+                  <div class="text-xs font-semibold text-gray-200 mb-1">Poszczególne Turnieje i Noty w Tańcach od Tego Sędziego:</div>
+                  <div id="coupleSingleJudgeEventsList" class="space-y-2 max-h-44 overflow-y-auto pr-1 text-xs"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Class Promotion Progress & Tournament Starts History -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div class="lg:col-span-4 glass-card rounded-2xl p-5">
+            <h3 class="font-bold text-base text-white mb-1">Kalkulator Awansu Klasowego FTS/PZST</h3>
+            <p class="text-xs text-gray-400 mb-4">Postęp punktowy i wymagane miejsca na podium do wyższej klasy startowej</p>
+            <div id="couplePromotionContainer" class="space-y-4"></div>
+          </div>
+
+          <div class="lg:col-span-8 glass-card rounded-2xl p-5">
+            <h3 class="font-bold text-base text-white mb-3">Pełna Historia Startów Turniejowych Pary</h3>
+            <div class="overflow-x-auto max-h-96">
+              <table class="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr class="border-b border-gray-800 text-gray-400 uppercase font-mono text-[11px]">
+                    <th class="py-2.5 px-2">Data</th>
+                    <th class="py-2.5 px-2">Turniej & Miasto</th>
+                    <th class="py-2.5 px-2">Kategoria</th>
+                    <th class="py-2.5 px-2 text-right">Miejsce / Par</th>
+                    <th class="py-2.5 px-2 text-right">Percentyl</th>
+                    <th class="py-2.5 px-2 text-right">Punkty</th>
+                    <th class="py-2.5 px-2 text-right">Skating</th>
+                  </tr>
+                </thead>
+                <tbody id="coupleStartsTableBody" class="divide-y divide-gray-800/60"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 3: DANCER PROFILE & PARTNER HISTORY ==================== -->
+      <section id="tabView-dancers" class="hidden space-y-6">
+        <div class="glass-card rounded-2xl p-4 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
+          <div class="flex items-center gap-3 flex-1">
+            <label class="text-xs font-mono uppercase text-amber-400 whitespace-nowrap">Wyszukaj Tancerza:</label>
+            <div class="relative w-full max-w-2xl">
+              <input
+                id="dancerSearchInput"
+                type="text"
+                placeholder="Szukaj tancerza po nazwisku, imieniu, 8-cyfrowym ID (20xxxxxx), WDSF MIN, klubie lub klasie..."
+                class="w-full bg-obsidian border border-gray-700 focus:border-amber-500 rounded-xl px-4 py-2 text-xs text-white placeholder-gray-500 focus:outline-none"
+              />
+              <div id="dancerSearchResults" class="hidden absolute left-0 right-0 mt-1.5 glass-card rounded-xl shadow-2xl max-h-80 overflow-y-auto z-40 divide-y divide-gray-800"></div>
+            </div>
+          </div>
+          <span class="text-xs text-gray-400">Każda zmiana partnera tworzy nowy unikalny klucz pary <code class="text-amber-400">ID_M_ID_K</code></span>
+        </div>
+
+        <div id="dancerProfileHeader" class="glass-card rounded-2xl p-6"></div>
+
+        <div class="glass-card rounded-2xl p-5">
+          <h3 class="font-bold text-base text-white mb-1">Oś Czasu Partnerstw Tancerza (Porównanie Wyników z Różnymi Partnerami)</h3>
+          <p class="text-xs text-gray-400 mb-4">Zestawienie wszystkich unikalnych par utworzonych przez tancerza w archiwach FTS i PZST</p>
+          <div id="dancerPartnershipsGrid" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+        </div>
+
+        <div class="glass-card rounded-2xl p-5">
+          <h3 class="font-bold text-base text-white mb-1">Wykres Kariery Tancerza (Przez Wszystkie Partnerstwa)</h3>
+          <p class="text-xs text-gray-400 mb-4">Kolory punktów oznaczają starty z poszczególnymi partnerami — pozwala ocenić wpływ zmiany partnera na wyniki</p>
+          <div class="h-80">
+            <canvas id="dancerCareerChart"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 4: HEAD-TO-HEAD COUPLE COMPARISON ==================== -->
+      <section id="tabView-h2h" class="hidden space-y-6">
+        <div class="glass-card rounded-2xl p-5">
+          <h3 class="font-bold text-base text-white mb-3">Porównywarka Par Head-to-Head (Wyszukaj dwie dowolne pary po nazwisku, ID, klubie lub klasie)</h3>
+          <div class="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
+            <div class="md:col-span-5 relative">
+              <label class="text-xs font-mono text-amber-400 uppercase block mb-1">Wyszukaj Parę A:</label>
+              <input type="hidden" id="h2hSelectA" value="" />
+              <input
+                id="h2hSearchInputA"
+                type="text"
+                placeholder="Wpisz nazwisko, ID, klub lub klasę Pary A..."
+                class="w-full bg-obsidian border border-amber-500/50 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none"
+              />
+              <div id="h2hSearchResultsA" class="hidden absolute left-0 right-0 mt-1 glass-card rounded-xl shadow-2xl max-h-64 overflow-y-auto z-40 divide-y divide-gray-800"></div>
+            </div>
+            <div class="md:col-span-2 flex justify-center">
+              <button
+                onclick="runHeadToHeadComparison()"
+                class="px-5 py-2.5 rounded-xl font-bold text-xs uppercase tracking-wider bg-gradient-to-r from-amber-500 to-indigo-600 text-obsidian shadow-lg hover:opacity-95 transition"
+              >
+                Porównaj VS
+              </button>
+            </div>
+            <div class="md:col-span-5 relative">
+              <label class="text-xs font-mono text-indigo-400 uppercase block mb-1">Wyszukaj Parę B:</label>
+              <input type="hidden" id="h2hSelectB" value="" />
+              <input
+                id="h2hSearchInputB"
+                type="text"
+                placeholder="Wpisz nazwisko, ID, klub lub klasę Pary B..."
+                class="w-full bg-obsidian border border-indigo-500/50 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none"
+              />
+              <div id="h2hSearchResultsB" class="hidden absolute left-0 right-0 mt-1 glass-card rounded-xl shadow-2xl max-h-64 overflow-y-auto z-40 divide-y divide-gray-800"></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="h2hSummaryContainer" class="grid grid-cols-1 lg:grid-cols-12 gap-6"></div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div class="lg:col-span-6 glass-card rounded-2xl p-5">
+            <h3 class="font-bold text-base text-white mb-3">Bezpośrednie Pojedynki na Turniejach (W tej samej kategorii)</h3>
+            <div id="h2hDirectEncountersList" class="space-y-2.5"></div>
+          </div>
+          <div class="lg:col-span-6 glass-card rounded-2xl p-5">
+            <h3 class="font-bold text-base text-white mb-1">Który Sędzia Woli Parę A, a Który Parę B?</h3>
+            <p class="text-xs text-gray-400 mb-3">Na podstawie wspólnych finałów ocenianych w systemie Skating</p>
+            <div id="h2hJudgesPreferenceTable" class="overflow-x-auto"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 5: TOURNAMENT EXPLORER & SKATING INSPECTOR ==================== -->
+      <section id="tabView-tournaments" class="hidden space-y-6">
+        <div class="glass-card rounded-2xl p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="font-bold text-base text-white">Wyszukiwarka Turniejów FTS & PZST (Filtruj po Klasie, Wieku, Stylu, Randze i Lokalizacji)</h3>
+            <button onclick="resetTournamentFilters()" class="text-xs text-amber-400 hover:underline">Wyczyść filtry</button>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
+            <input
+              id="filterTourQuery"
+              type="text"
+              oninput="filterTournaments()"
+              placeholder="Nazwa lub miasto (np. Słupsk, Elbląg)..."
+              class="bg-obsidian border border-gray-700 rounded-xl px-3 py-2 text-xs text-white"
+            />
+            <select id="filterTourVoivodeship" onchange="filterTournaments()" class="bg-obsidian border border-gray-700 rounded-xl px-3 py-2 text-xs text-white">
+              <option value="">Wszystkie Województwa</option>
+              <option value="Pomorskie">Pomorskie</option>
+              <option value="Warmińsko-Mazurskie">Warmińsko-Mazurskie</option>
+              <option value="Mazowieckie">Mazowieckie</option>
+              <option value="Małopolskie">Małopolskie</option>
+              <option value="Dolnośląskie">Dolnośląskie</option>
+              <option value="Wielkopolskie">Wielkopolskie</option>
+            </select>
+            <select id="filterTourClass" onchange="filterTournaments()" class="bg-obsidian border border-gray-700 rounded-xl px-3 py-2 text-xs text-white">
+              <option value="">Wszystkie Klasy (H..S)</option>
+              <option value="S">Klasa S / Open</option>
+              <option value="A">Klasa A</option>
+              <option value="B">Klasa B</option>
+              <option value="C">Klasa C</option>
+              <option value="D">Klasa D</option>
+              <option value="E">Klasa E</option>
+            </select>
+            <select id="filterTourAge" onchange="filterTournaments()" class="bg-obsidian border border-gray-700 rounded-xl px-3 py-2 text-xs text-white">
+              <option value="">Wszystkie Kat. Wiekowe</option>
+              <option value="Pow. 15">Dorośli / Pow. 15</option>
+              <option value="14-15">Juniorzy Starsi (14-15)</option>
+              <option value="12-13">Juniorzy Młodsi (12-13)</option>
+            </select>
+            <select id="filterTourStyle" onchange="filterTournaments()" class="bg-obsidian border border-gray-700 rounded-xl px-3 py-2 text-xs text-white">
+              <option value="">Wszystkie Style</option>
+              <option value="Standard">Standard (ST)</option>
+              <option value="Latin">Latin (LA)</option>
+              <option value="Kombinacja">Kombinacja (8T / 10T)</option>
+            </select>
+            <select id="filterTourRank" onchange="filterTournaments()" class="bg-obsidian border border-gray-700 rounded-xl px-3 py-2 text-xs text-white">
+              <option value="">Wszystkie Rangi</option>
+              <option value="Mistrzostwa Polski">Mistrzostwa Polski</option>
+              <option value="Puchar Polski">Puchar Polski</option>
+              <option value="Grand Prix">Grand Prix Polski</option>
+              <option value="Mistrzostwa Województwa">Mistrzostwa Województwa</option>
+              <option value="OTTS">OTTS</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div id="tournamentsCatalogList" class="lg:col-span-5 space-y-3 max-h-[820px] overflow-y-auto pr-1"></div>
+          <div id="categoryInspectorPane" class="lg:col-span-7 glass-card rounded-2xl p-5"></div>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 6: JUDGES ANALYTICS & BIAS MATRIX ==================== -->
+      <section id="tabView-judges" class="hidden space-y-6">
+        <div class="glass-card rounded-2xl p-4 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
+          <div class="flex items-center gap-3 flex-1">
+            <label class="text-xs font-mono uppercase text-amber-400 whitespace-nowrap">Wyszukaj Sędziego FTS / PZST:</label>
+            <div class="relative w-full max-w-2xl">
+              <input
+                id="judgeSearchInput"
+                type="text"
+                placeholder="Wpisz nazwisko sędziego, numer ID (np. 30000185), miasto, okręg (np. WMZST, LZST) lub licencję..."
+                class="w-full bg-obsidian border border-gray-700 focus:border-amber-500 rounded-xl px-4 py-2 text-xs text-white placeholder-gray-500 focus:outline-none"
+              />
+              <div id="judgeSearchResults" class="hidden absolute left-0 right-0 mt-1.5 glass-card rounded-xl shadow-2xl max-h-80 overflow-y-auto z-40 divide-y divide-gray-800"></div>
+            </div>
+          </div>
+          <div class="text-xs text-gray-400">
+            Analiza zgodności z panelem (Consensus Index) oraz odchyleń dla par i klubów
+          </div>
+        </div>
+
+        <div id="judgeProfileHeader" class="glass-card rounded-2xl p-6"></div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div class="lg:col-span-7 glass-card rounded-2xl p-5">
+            <h3 class="font-bold text-base text-white mb-1">Zestawienie Ocen Par przez Sędziego (Kogo Ocenia Wyżej, a Kogo Niżej od Panelu?)</h3>
+            <p class="text-xs text-gray-400 mb-3">Ujemna wartość Δ oznacza, że sędzia daje parze lepsze miejsce (np. 1. zamiast 2.) niż reszta komisji</p>
+            <div class="overflow-x-auto max-h-96">
+              <table class="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr class="border-b border-gray-800 text-gray-400 uppercase font-mono text-[11px]">
+                    <th class="py-2 px-2">Para (ID_M_ID_K)</th>
+                    <th class="py-2 px-2">Klub</th>
+                    <th class="py-2 px-2 text-right">Tańce</th>
+                    <th class="py-2 px-2 text-right">Śr. Sędziego</th>
+                    <th class="py-2 px-2 text-right">Śr. Panelu</th>
+                    <th class="py-2 px-2 text-right">Δ Bias</th>
+                    <th class="py-2 px-2 text-right">Zgodność %</th>
+                  </tr>
+                </thead>
+                <tbody id="judgeCouplesMatrixBody" class="divide-y divide-gray-800/60"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="lg:col-span-5 space-y-6">
+            <div class="glass-card rounded-2xl p-5">
+              <h3 class="font-bold text-base text-white mb-1">Indeks Przychylności Klubowej (Club Affinity Δ)</h3>
+              <p class="text-xs text-gray-400 mb-3">Średnie odchylenie ocen sędziego dla zawodników poszczególnych klubów</p>
+              <div class="h-56">
+                <canvas id="judgeClubBiasChart"></canvas>
+              </div>
+            </div>
+
+            <div class="glass-card rounded-2xl p-5">
+              <h3 class="font-bold text-base text-white mb-2">Historia Sędziowanych Turniejów i Kategorii</h3>
+              <div id="judgeTournamentsList" class="space-y-2 max-h-60 overflow-y-auto text-xs"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="./ftsStaticData.js" onerror="console.log('Checking /static/ftsStaticData.js')"></script>
+  <script src="/static/ftsStaticData.js" onerror="console.log('Loaded local bundle')"></script>
+  <script src="./appClient.js" onerror="console.log('Loading /static/appClient.js')"></script>
+  <script src="/static/appClient.js" onerror="console.log('Loaded local client')"></script>
+</body>
+</html>
