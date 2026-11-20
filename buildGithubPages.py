@@ -72,7 +72,11 @@ def buildStaticGithubPagesBundle() -> None:
 
     allParticipations = [dict(r) for r in cursor.execute("""
         SELECT
-            p.*,
+            p.categoryId,
+            p.tournamentId,
+            p.coupleKey,
+            p.finalPlace,
+            p.pointsEarned,
             t.competitionName,
             t.cityName,
             t.dateStart,
@@ -101,14 +105,13 @@ def buildStaticGithubPagesBundle() -> None:
         WHERE jm.markType = 'SKATING'
     """).fetchall()]
 
-    # Only query existing (coupleKey, judgeId) pairs!
     validCoupleJudgePairs = cursor.execute("""
-        SELECT DISTINCT coupleKey, judgeId FROM judgeMarks
+        SELECT DISTINCT coupleKey, judgeId FROM judgeMarks WHERE markType = 'SKATING'
     """).fetchall()
 
     connection.close()
 
-    print(f"Building static analytics bundle for {len(dancers)} dancers, {len(couples)} couples, {len(categoriesIds)} categories...")
+    print(f"Building compact static bundle for {len(dancers)} dancers, {len(couples)} couples, {len(categoriesIds)} categories...")
     dancersAnalyticsMap = {d["dancerId"]: getDancerFullAnalytics(d["dancerId"]) for d in dancers}
     couplesAnalyticsMap = {c["coupleKey"]: getCoupleDeepAnalytics(c["coupleKey"]) for c in couples}
     categoriesDetailsMap = {catId: getCategorySkatingAndResults(catId) for catId in categoriesIds}
@@ -146,13 +149,14 @@ def buildStaticGithubPagesBundle() -> None:
     os.makedirs(staticDir, exist_ok=True)
     os.makedirs(docsDir, exist_ok=True)
 
-    bundleJsContent = "window.FTS_STATIC_BUNDLE = " + json.dumps(fullStaticBundle, ensure_ascii=False) + ";\n"
+    bundleJsContent = "window.FTS_STATIC_BUNDLE=" + json.dumps(fullStaticBundle, ensure_ascii=False, separators=(",", ":")) + ";\n"
 
     with open(os.path.join(staticDir, "ftsStaticData.js"), "w", encoding="utf-8") as fStatic:
         fStatic.write(bundleJsContent)
 
     for targetFolder in [baseDir, docsDir]:
         shutil.copyfile(os.path.join(staticDir, "ftsStaticData.js"), os.path.join(targetFolder, "ftsStaticData.js"))
+        shutil.copyfile(os.path.join(staticDir, "liveBrowserSync.js"), os.path.join(targetFolder, "liveBrowserSync.js"))
         shutil.copyfile(os.path.join(staticDir, "index.html"), os.path.join(targetFolder, "index.html"))
         shutil.copyfile(os.path.join(staticDir, "appClient.js"), os.path.join(targetFolder, "appClient.js"))
         with open(os.path.join(targetFolder, ".nojekyll"), "w", encoding="utf-8") as fNoJekyll:
@@ -161,4 +165,4 @@ def buildStaticGithubPagesBundle() -> None:
 
 if __name__ == "__main__":
     buildStaticGithubPagesBundle()
-    print("Static GitHub Pages bundle generated successfully.")
+    print("Compact static GitHub Pages bundle generated successfully.")

@@ -1,0 +1,38 @@
+name: Auto-Sync FTS & PZST Live Database to GitHub Pages
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  syncAndDeploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml
+
+      - name: Pull latest tournaments, dancers, couples, and Skating marks from FTS & PZST
+        run: |
+          python bulkLiveIngestor.py
+          python buildGithubPages.py
+
+      - name: Commit and push updated database to main and gh-pages
+        run: |
+          git config user.name "fts-analytics-bot"
+          git config user.email "bot@fts-analytics.local"
+          git add .
+          git diff --staged --quiet || (git commit -m "Auto-sync latest FTS/PZST tournaments and results" && git push origin main && git push origin main:gh-pages --force)

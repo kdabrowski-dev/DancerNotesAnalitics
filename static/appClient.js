@@ -297,6 +297,17 @@ async function initApplication() {
     }
     await filterTournaments();
     await loadJudgeAnalytics();
+
+    // Automatically check baza.polskitaniec.org/cal/archive in the background on startup (including on GitHub Pages!)
+    // so any brand-new tournaments or live results published today are pulled dynamically by the browser!
+    if (typeof runBrowserLiveFtsSync === 'function') {
+      runBrowserLiveFtsSync(2).then((liveRes) => {
+        if (liveRes && liveRes.newTournamentsAdded > 0) {
+          console.log('Dynamically pulled new live tournaments from baza.polskitaniec.org:', liveRes);
+          initApplication();
+        }
+      });
+    }
   } catch (err) {
     console.error('Initialization error:', err);
   }
@@ -1839,20 +1850,45 @@ async function loadJudgeAnalytics(selectedJudgeId = null) {
     .join('');
 }
 
-// Live Sync Trigger
+// Live Sync Trigger (Works both with local FastAPI backend AND directly in browser on GitHub Pages!)
 async function triggerLiveFtsSync() {
   const btn = document.getElementById('syncLiveBtn');
   const origHtml = btn.innerHTML;
-  btn.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span><span>Pobieranie z baza.polskitaniec.org...</span>`;
+  btn.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span><span>Pobieranie LIVE z baza.polskitaniec.org...</span>`;
   btn.disabled = true;
   try {
-    const res = await fetch('/api/sync-live?maxTournaments=4', { method: 'POST' }).then((r) => r.json());
-    await initApplication();
-    alert(
-      `Synchronizacja zakończona (${res.status})!\nZaktualizowano turniejów: ${res.syncedTournaments || 0}\nKategorii LIVE: ${res.syncedCategories || 0}\nNot sędziowskich: ${res.syncedMarks || 0}`
-    );
+    let backendSynced = false;
+    if (window.location.protocol !== 'file:' && !window.location.hostname.includes('github.io')) {
+      try {
+        const resp = await fetch('/api/sync-live?maxTournaments=5', { method: 'POST' });
+        if (resp.ok) {
+          const res = await resp.json();
+          backendSynced = true;
+          await initApplication();
+          alert(
+            `Synchronizacja z serwerem FTS/PZST zakończona (${res.status})!\nZaktualizowano turniejów: ${res.syncedTournaments || 0}\nKategorii LIVE: ${res.syncedCategories || 0}\nNot sędziowskich: ${res.syncedMarks || 0}`
+          );
+        }
+      } catch (err) {
+        // Fallback to direct browser live sync
+      }
+    }
+
+    if (!backendSynced && typeof runBrowserLiveFtsSync === 'function') {
+      const liveReport = await runBrowserLiveFtsSync(5, (progressMsg) => {
+        btn.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span><span class="truncate">${progressMsg}</span>`;
+      });
+      await initApplication();
+      alert(
+        `Dynamiczna synchronizacja przeglądarkowa (GitHub Pages LIVE) zakończona!\n` +
+          `Sprawdzono turniejów w API baza.polskitaniec.org/cal/archive: ${liveReport.totalArchiveTournamentsFound || 0}\n` +
+          `Nowo wykryte turnieje: ${liveReport.newTournamentsAdded || 0}\n` +
+          `Nowo pobrane kategorie LIVE: ${liveReport.liveCategoriesSynced || 0}\n` +
+          `Łącznie par w bazie: ${liveReport.couplesCount || appCatalog.couples.length}`
+      );
+    }
   } catch (e) {
-    alert('Praca w trybie lokalnej bazy SQLite.');
+    console.error('Live sync error:', e);
   } finally {
     btn.innerHTML = origHtml;
     btn.disabled = false;
