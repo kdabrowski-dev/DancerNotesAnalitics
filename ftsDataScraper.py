@@ -104,12 +104,14 @@ class FtsDataSyncManager:
                 return nameToIdsMap
             soup = BeautifulSoup(response.text, "html.parser")
             for row in soup.select("tr"):
+                for mobileP in row.select("p.d-md-none, p.d-xs-inline"):
+                    mobileP.decompose()
                 cells = [c.get_text(" ", strip=True) for c in row.find_all("td")]
                 if len(cells) >= 4 and "/" in cells[1] and "/" in cells[2]:
-                    namesParts = [p.strip() for p in cells[1].split("/")]
-                    idsParts = [re.sub(r"\D", "", p) for p in cells[2].split("/")]
+                    namesParts = [re.sub(r"\d{6,8}", "", p).strip() for p in cells[1].split("/") if p.strip()]
+                    idsParts = re.findall(r"\b\d{7,8}\b", cells[2])
                     clubText = cells[3].strip()
-                    if len(namesParts) == 2 and len(idsParts) == 2 and idsParts[0] and idsParts[1]:
+                    if len(namesParts) == 2 and len(idsParts) == 2:
                         normKey = self.normalizeCoupleNameKey(f"{namesParts[0]} / {namesParts[1]}")
                         nameToIdsMap[normKey] = (idsParts[0], idsParts[1], clubText)
                 elif len(cells) >= 6:

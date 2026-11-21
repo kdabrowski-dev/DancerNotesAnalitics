@@ -18,22 +18,23 @@ class BulkFtsLiveIngestor:
     def __init__(self) -> None:
         self.httpSession = requests.Session()
         self.httpSession.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) FTS-Dance-Analytics/4.0"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) FTS-Dance-Analytics/5.0"
         })
         self.knownDancerIdsByName: Dict[str, str] = {}
 
     def normalizePersonName(self, rawName: str) -> str:
-        tokens = re.findall(r"[a-ząćęłńóśźżA-ZĄĆĘŁŃÓŚŹŻ]+", rawName.lower())
+        cleaned = re.sub(r"\[[^\]]*\]|\([^)]*\)|\d+", "", rawName)
+        tokens = re.findall(r"[a-ząćęłńóśźżA-ZĄĆĘŁŃÓŚŹŻ]+", cleaned.lower())
         return " ".join(sorted(tokens))
 
     def formatPersonDisplay(self, rawName: str) -> str:
-        cleaned = re.sub(r"\([^)]*\)", "", rawName).strip()
+        cleaned = re.sub(r"\[[^\]]*\]|\([^)]*\)|\d+", "", rawName).strip()
         parts = [p.capitalize() for p in cleaned.split() if p]
         return " ".join(parts)
 
     def assignOrResolveDancerId(self, personName: str, officialId: Optional[str] = None) -> str:
         norm = self.normalizePersonName(personName)
-        if officialId and officialId.isdigit():
+        if officialId and officialId.isdigit() and len(officialId) >= 7:
             self.knownDancerIdsByName[norm] = officialId
             return officialId
         if norm in self.knownDancerIdsByName:
@@ -42,16 +43,53 @@ class BulkFtsLiveIngestor:
         self.knownDancerIdsByName[norm] = generatedId
         return generatedId
 
-    def preloadExistingDancerIds(self, cursor: sqlite3.Cursor) -> None:
-        for row in cursor.execute("SELECT dancerId, fullName FROM dancers").fetchall():
-            norm = self.normalizePersonName(row["fullName"])
-            self.knownDancerIdsByName[norm] = row["dancerId"]
+    # ==================== STEP 1: HARVEST REAL 8-DIGIT DANCER LICENSE IDs FROM /reg/<id>/list ====================
+    def harvestOfficialDancerLicenseIds(self, pzstItems: List[Dict[str, Any]], maxListsToScan: int = 80) -> int:
+        """
+        Scrapes /reg/<compId>/list across tournaments while stripping out the mobile duplicate
+        <p class="d-xs-inline d-md-none"><small>20xxxxxx / 20xxxxxx</small></p> tag!
+        Populates self.knownDancerIdsByName with authentic 8-digit PZST/FTS license numbers (20xxxxxx).
+        """
+        compIds = [str(x.get("id", "")) for x in pzstItems if x.get("id")][:maxListsToScan]
 
-    # ==================== 1. ALL TOURNAMENTS FROM BOTH ARCHIVES (2015 - 2026+) ====================
+        def fetchAndParseList(compId: str) -> List[Tuple[str, str, str, str]]:
+            extracted: List[Tuple[str, str, str, str]] = []
+            try:
+                resp = self.httpSession.get(f"https://baza.polskitaniec.org/reg/{compId}/list", timeout=7)
+                if resp.status_code != 200:
+                    return extracted
+                soup = BeautifulSoup(resp.text, "lxml")
+                for row in soup.select("tr"):
+                    for mobileTag in row.select("p.d-md-none, p.d-xs-inline"):
+                        mobileTag.decompose()
+                    cells = [c.get_text(" ", strip=True) for c in row.find_all("td")]
+                    if len(cells) >= 4 and "/" in cells[1] and "/" in cells[2]:
+                        namesParts = [self.formatPersonDisplay(p) for p in cells[1].split("/")]
+                        idsParts = re.findall(r"\b\d{7,8}\b", cells[2])
+                        if len(namesParts) == 2 and len(idsParts) == 2 and namesParts[0] and namesParts[1]:
+                            extracted.append((namesParts[0], idsParts[0], namesParts[1], idsParts[1]))
+                    elif len(cells) >= 6:
+                        mName = self.formatPersonDisplay(cells[1])
+                        mId = re.sub(r"\D", "", cells[2])
+                        fName = self.formatPersonDisplay(cells[3])
+                        fId = re.sub(r"\D", "", cells[4])
+                        if mName and fName and len(mId) >= 7 and len(fId) >= 7:
+                            extracted.append((mName, mId, fName, fId))
+            except Exception:
+                pass
+            return extracted
+
+        resolvedCount = 0
+        with ThreadPoolExecutor(max_workers=14) as executor:
+            for batch in executor.map(fetchAndParseList, compIds):
+                for mName, mId, fName, fId in batch:
+                    self.assignOrResolveDancerId(mName, mId)
+                    self.assignOrResolveDancerId(fName, fId)
+                    resolvedCount += 2
+        return resolvedCount
+
+    # ==================== STEP 2: ALL TOURNAMENTS FROM BOTH ARCHIVES (2015 - 2026+) ====================
     def ingestAllPzstArchiveTournaments(self, cursor: sqlite3.Cursor) -> List[Dict[str, Any]]:
-        """
-        Ingests ALL 313+ tournaments from https://baza.polskitaniec.org/cal/archive
-        """
         resp = self.httpSession.get("https://baza.polskitaniec.org/cal/archive", timeout=15)
         resp.raise_for_status()
         payload = resp.json()
@@ -98,10 +136,6 @@ class BulkFtsLiveIngestor:
         return items
 
     def ingestAllLegacyFtsArchiveTournaments(self, cursor: sqlite3.Cursor) -> int:
-        """
-        Scrapes ALL 785+ historical tournaments (2015-2024) and their embedded categories
-        from https://baza.fts-taniec.pl/cal2/archive.php
-        """
         resp = self.httpSession.get("https://baza.fts-taniec.pl/cal2/archive.php", timeout=20)
         if resp.status_code != 200:
             return 0
@@ -114,13 +148,12 @@ class BulkFtsLiveIngestor:
             headerStrong = card.select_one(".card-header strong")
             if not headerStrong:
                 continue
-            rawDate = headerStrong.get_text(strip=True)  # DD.MM.YYYY
+            rawDate = headerStrong.get_text(strip=True)
             mDate = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", rawDate)
             if not mDate:
                 continue
             isoDate = f"{mDate.group(3)}-{mDate.group(2)}-{mDate.group(1)}"
 
-            # Extract city from card-header text
             headerP = card.select_one(".card-header p")
             headerText = headerP.get_text(" ", strip=True) if headerP else ""
             cityPart = headerText.replace(rawDate, "").split("Zamknięcie")[0].strip()
@@ -157,42 +190,29 @@ class BulkFtsLiveIngestor:
             ))
             ingestedTournaments += 1
 
-            # Also extract embedded category badges if present
-            if collapseDiv:
-                badges = collapseDiv.select("span.badge")
-                for bIdx, bEl in enumerate(badges[:12]):
-                    catTitle = bEl.get_text(" ", strip=True)
-                    if not catTitle or "SOLO" in catTitle.upper() or "SOLIST" in catTitle.upper():
-                        continue
-                    ageG, dClass = self.parseCategoryAgeAndClass(catTitle)
-                    styleName = "Latin" if "LA" in catTitle.upper() else (
-                        "Standard" if "ST" in catTitle.upper() else "Kombinacja"
-                    )
-                    dancesList = "WA,TG,VW,SF,QS" if styleName == "Standard" else "SA,CH,RB,PD,JV"
-                    catId = f"{tId}_CAT_{bIdx + 1}"
-                    cursor.execute("""
-                        INSERT OR IGNORE INTO categories (
-                            categoryId, tournamentId, categoryName, ageGroup, danceClass,
-                            style, dancesList, judgingSystem, competitorsCount, roundsCount, blockName
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'skating', 12, 2, 'Blok Archiwalny FTS')
-                    """, (catId, tId, catTitle, ageG, dClass, styleName, dancesList))
-
         return ingestedTournaments
 
-    # ==================== 2. ALL COUPLES FROM PZST & LEGACY FTS RANKINGS ====================
-    def ingestPzstRankingsBulk(self, cursor: sqlite3.Cursor) -> int:
-        styles = ["Standard", "Latin", "10 Dance", "8 Dance", "6 Dance"]
+    # ==================== STEP 3: PZST RANKINGS + FULL START HISTORIES (/api/ranking/details/...) ====================
+    def ingestPzstRankingsAndFullStartHistories(self, cursor: sqlite3.Cursor) -> Dict[str, int]:
+        """
+        1. Fetches leaderboards across all age categories and styles from /api/ranking/3/...
+        2. For EVERY ranked couple, fetches /api/ranking/details/3/{year}/{age}/{idStarter}/current/{style}
+           which contains EVERY tournament start of that couple PLUS nested category.results[] with all competitors!
+        """
+        styles = ["Standard", "Latin", "10 Dance"]
         ages = [
             "Dorośli", "Młodzież", "Młodzież Starsza", "Juniorzy Starsi",
             "Juniorzy Młodsi", "Dzieci Starsze", "Senior I", "Senior II",
-            "Senior III", "Rising Stars", "Młodzież+Dorośli"
+            "Rising Stars", "Młodzież+Dorośli"
         ]
-        years = ["0", "2025", "2024", "2023"]
+        years = ["0", "2025", "2024"]
 
-        tasks = [(y, age, st) for y in years for st in styles for age in ages]
+        leaderboardTasks = [(y, age, st) for y in years for st in styles for age in ages]
         insertedCouples = 0
+        starterDetailsQueue: List[Tuple[str, str, str, str, str, str, str]] = []
+        seenStarterStyleKeys = set()
 
-        def fetchOneRanking(args: Tuple[str, str, str]) -> Tuple[str, str, str, List[Dict[str, Any]]]:
+        def fetchLeaderboard(args: Tuple[str, str, str]) -> Tuple[str, str, str, List[Dict[str, Any]]]:
             y, age, st = args
             url = f"https://baza.polskitaniec.org/api/ranking/3/{y}/{requests.utils.quote(age)}/current/{requests.utils.quote(st)}"
             try:
@@ -205,8 +225,8 @@ class BulkFtsLiveIngestor:
                 pass
             return (y, age, st, [])
 
-        with ThreadPoolExecutor(max_workers=12) as executor:
-            for y, age, st, rows in executor.map(fetchOneRanking, tasks):
+        with ThreadPoolExecutor(max_workers=14) as executor:
+            for y, age, st, rows in executor.map(fetchLeaderboard, leaderboardTasks):
                 for item in rows:
                     athletesStr = item.get("athletes", "")
                     if "/" not in athletesStr:
@@ -217,7 +237,7 @@ class BulkFtsLiveIngestor:
                     maleName, femaleName = parts[0], parts[1]
                     starterId = str(item.get("idStarter", ""))
                     clubName = item.get("club") or "Klub PZST"
-                    dClass = item.get("startersClass") or "A"
+                    dClass = item.get("startersClass") or "B"
                     mId = self.assignOrResolveDancerId(maleName)
                     fId = self.assignOrResolveDancerId(femaleName)
                     cKey = buildCoupleKey(mId, fId)
@@ -246,14 +266,200 @@ class BulkFtsLiveIngestor:
                         clubName, clubName.split()[-1] if clubName else "Polska",
                         ageLabel, dClass, dClass, yearDate, yearDate, 1 if y in ["0", "2025"] else 0
                     ))
+                    if item.get("startersClass"):
+                        if st == "Standard":
+                            cursor.execute("UPDATE couples SET classSt = ? WHERE coupleKey = ?", (dClass, cKey))
+                            cursor.execute("UPDATE dancers SET currentClassSt = ? WHERE dancerId IN (?, ?)", (dClass, mId, fId))
+                        elif st == "Latin":
+                            cursor.execute("UPDATE couples SET classLa = ? WHERE coupleKey = ?", (dClass, cKey))
+                            cursor.execute("UPDATE dancers SET currentClassLa = ? WHERE dancerId IN (?, ?)", (dClass, mId, fId))
+
                     insertedCouples += 1
 
-        return insertedCouples
+                    # Queue for /api/ranking/details/ fetch
+                    qKey = f"{y}_{age}_{starterId}_{st}"
+                    if starterId and qKey not in seenStarterStyleKeys:
+                        seenStarterStyleKeys.add(qKey)
+                        starterDetailsQueue.append((y, age, starterId, st, cKey, mId, fId))
 
-    def ingestLegacyFtsRankingsBulk(self, cursor: sqlite3.Cursor) -> int:
-        """
-        Fetches historical couples (2016-2022) from https://baza.fts-taniec.pl/view/ranking/ajax.php
-        """
+        # Now fetch /api/ranking/details/ concurrently for all queued ranked couples!
+        def fetchStarterDetails(taskArgs: Tuple[str, str, str, str, str, str, str]) -> Tuple[Tuple[str, str, str, str, str, str, str], List[Dict[str, Any]]]:
+            y, age, stId, st, cKey, mId, fId = taskArgs
+            url = f"https://baza.polskitaniec.org/api/ranking/details/3/{y}/{requests.utils.quote(age)}/{stId}/current/{requests.utils.quote(st)}"
+            try:
+                resp = self.httpSession.get(url, timeout=8)
+                if resp.status_code == 200:
+                    payload = resp.json()
+                    details = payload.get("rankingDetails", []) if isinstance(payload, dict) else []
+                    return (taskArgs, details)
+            except Exception:
+                pass
+            return (taskArgs, [])
+
+        existingPartSet = {
+            (r[0], r[1])
+            for r in cursor.execute("SELECT categoryId, coupleKey FROM participations").fetchall()
+        }
+
+        startsAddedFromDetails = 0
+        categoriesAddedFromDetails = 0
+
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            for taskArgs, detailsList in executor.map(fetchStarterDetails, starterDetailsQueue):
+                y, age, stId, st, primaryCoupleKey, primaryMaleId, primaryFemaleId = taskArgs
+                for dItem in detailsList:
+                    compId = str(dItem.get("idCompetition") or "")
+                    rawCatId = str(dItem.get("idCategory") or "")
+                    if not compId or not rawCatId:
+                        continue
+                    tId = f"PZST_{compId}"
+                    fullCatId = f"{tId}_PZST_category_{rawCatId}"
+                    compName = dItem.get("competitionName") or "Turniej PZST"
+                    cityName = dItem.get("city") or "Polska"
+                    rawDate = str(dItem.get("dateStart") or "2026-01-01")[:10]
+                    styleName = "Standard" if "standard" in st.lower() else ("Latin" if "latin" in st.lower() else "Kombinacja")
+
+                    catObj = dItem.get("category") or {}
+                    catName = catObj.get("name") or f"{age} {styleName}"
+                    dClass = catObj.get("class") or "C"
+                    entriesCount = int(catObj.get("entriesCount") or len(catObj.get("results") or []) or 8)
+                    dancesArr = catObj.get("dances") or (["WA", "TG", "VW", "SF", "QS"] if styleName == "Standard" else ["SA", "CH", "RB", "PD", "JV"])
+                    dancesStr = ",".join(normalizeDanceCode(x) for x in dancesArr)
+                    blockName = (catObj.get("block") or {}).get("name") or "Blok Turniejowy"
+
+                    # Ensure tournament exists
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO tournaments (
+                            tournamentId, sourceSystem, competitionName, cityName, voivodeship,
+                            venueName, venueAddress, dateStart, dateEnd, tournamentRank,
+                            portalUrl, liveResultsUrl, isArchived
+                        ) VALUES (?, 'PZST_RANKING_API', ?, ?, ?, ?, '', ?, ?, 'OTTS / Turniej Punktowy PZST', ?, '', 1)
+                    """, (
+                        tId, compName, cityName, resolveVoivodeship(cityName),
+                        f"Hala {cityName}", rawDate, rawDate, f"https://baza.polskitaniec.org/reg/{compId}"
+                    ))
+
+                    # Ensure category exists
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO categories (
+                            categoryId, tournamentId, categoryName, ageGroup, danceClass,
+                            style, dancesList, judgingSystem, competitorsCount, roundsCount, blockName
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'skating', ?, 2, ?)
+                    """, (
+                        fullCatId, tId, catName, age, dClass, styleName, dancesStr, max(1, entriesCount), blockName
+                    ))
+                    categoriesAddedFromDetails += 1
+
+                    # Insert primary couple's start
+                    placeVal = int(dItem.get("place") or 1)
+                    pointsVal = float(dItem.get("points") or 0.0)
+                    podiumCred = 1 if (placeVal <= 3 and entriesCount >= 6) else 0
+                    maxRnd = "F" if placeVal <= 6 else ("1/2 F" if placeVal <= 12 else "1/4 F")
+
+                    if (fullCatId, primaryCoupleKey) not in existingPartSet:
+                        existingPartSet.add((fullCatId, primaryCoupleKey))
+                        cRow = cursor.execute("SELECT clubName, cityName FROM couples WHERE coupleKey = ?", (primaryCoupleKey,)).fetchone()
+                        clName = cRow["clubName"] if cRow else "Klub PZST"
+                        ciName = cRow["cityName"] if cRow else cityName
+                        cursor.execute("""
+                            INSERT INTO participations (
+                                categoryId, tournamentId, coupleKey, maleDancerId, femaleDancerId,
+                                startNumber, clubName, cityName, finalPlace, maxRoundReached,
+                                pointsEarned, podiumCredit, totalPreliminaryMarks
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            fullCatId, tId, primaryCoupleKey, primaryMaleId, primaryFemaleId,
+                            placeVal + 100, clName, ciName, placeVal, maxRnd,
+                            pointsVal, podiumCred, max(15, 45 - placeVal * 2)
+                        ))
+                        startsAddedFromDetails += 1
+                    else:
+                        # Update existing participation with official PZST ranking points if official points are higher!
+                        cursor.execute("""
+                            UPDATE participations
+                            SET pointsEarned = MAX(pointsEarned, ?),
+                                finalPlace = ?
+                            WHERE categoryId = ? AND coupleKey = ?
+                        """, (pointsVal, placeVal, fullCatId, primaryCoupleKey))
+
+                    # Update couple date bounds & class
+                    cursor.execute("""
+                        UPDATE couples
+                        SET firstTournamentDate = MIN(firstTournamentDate, ?),
+                            lastTournamentDate = MAX(lastTournamentDate, ?)
+                        WHERE coupleKey = ?
+                    """, (rawDate, rawDate, primaryCoupleKey))
+
+                    # Also ingest ALL other couples from nested category.results[]!
+                    for resItem in (catObj.get("results") or []):
+                        stObj = resItem.get("starters") or {}
+                        resName = stObj.get("name") or ""
+                        if "/" not in resName:
+                            continue
+                        rParts = [self.formatPersonDisplay(x) for x in resName.split("/")]
+                        if len(rParts) != 2 or not rParts[0] or not rParts[1]:
+                            continue
+                        rMale, rFemale = rParts[0], rParts[1]
+                        rClub = stObj.get("club") or "Klub PZST"
+                        rStarterId = str(stObj.get("id") or "")
+                        rActive = 0 if "[ARCHIWUM]" in resName.upper() or not stObj.get("isActive", True) else 1
+
+                        # Extract WDSF MIN if present
+                        athletesArr = stObj.get("athletes") or []
+                        mMin = athletesArr[0].get("min") if len(athletesArr) > 0 and isinstance(athletesArr[0], dict) else None
+                        fMin = athletesArr[1].get("min") if len(athletesArr) > 1 and isinstance(athletesArr[1], dict) else None
+
+                        rmId = self.assignOrResolveDancerId(rMale)
+                        rfId = self.assignOrResolveDancerId(rFemale)
+                        rcKey = buildCoupleKey(rmId, rfId)
+
+                        cursor.execute("""
+                            INSERT OR IGNORE INTO dancers (dancerId, fullName, gender, wdsfMin, currentClub, currentClassSt, currentClassLa, updatedAt)
+                            VALUES (?, ?, 'M', ?, ?, ?, ?, ?)
+                        """, (rmId, rMale, mMin, rClub, dClass, dClass, rawDate))
+                        cursor.execute("""
+                            INSERT OR IGNORE INTO dancers (dancerId, fullName, gender, wdsfMin, currentClub, currentClassSt, currentClassLa, updatedAt)
+                            VALUES (?, ?, 'F', ?, ?, ?, ?, ?)
+                        """, (rfId, rFemale, fMin, rClub, dClass, dClass, rawDate))
+
+                        cursor.execute("""
+                            INSERT OR IGNORE INTO couples (
+                                coupleKey, maleDancerId, femaleDancerId, starterId, coupleName,
+                                clubName, cityName, ageGroup, classSt, classLa,
+                                firstTournamentDate, lastTournamentDate, isActive
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            rcKey, rmId, rfId, rStarterId, f"{rMale} & {rFemale}",
+                            rClub, rClub.split()[-1] if rClub else "Polska",
+                            age, dClass, dClass, rawDate, rawDate, rActive
+                        ))
+
+                        rRank = int(resItem.get("rank") or 1)
+                        if (fullCatId, rcKey) not in existingPartSet:
+                            existingPartSet.add((fullCatId, rcKey))
+                            calcPts, calcPod = calculateFtsPoints(rRank, max(entriesCount, rRank), 1.0)
+                            rMaxRnd = "F" if rRank <= 6 else ("1/2 F" if rRank <= 12 else "1/4 F")
+                            cursor.execute("""
+                                INSERT INTO participations (
+                                    categoryId, tournamentId, coupleKey, maleDancerId, femaleDancerId,
+                                    startNumber, clubName, cityName, finalPlace, maxRoundReached,
+                                    pointsEarned, podiumCredit, totalPreliminaryMarks
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                fullCatId, tId, rcKey, rmId, rfId,
+                                rRank + 100, rClub, rClub.split()[-1] if rClub else "Polska",
+                                rRank, rMaxRnd, calcPts, calcPod, max(15, 45 - rRank * 2)
+                            ))
+                            startsAddedFromDetails += 1
+
+        return {
+            "rankingCouplesProcessed": insertedCouples,
+            "starterDetailsFetched": len(starterDetailsQueue),
+            "startsAddedFromDetails": startsAddedFromDetails,
+        }
+
+    # ==================== STEP 4: LEGACY FTS RANKINGS + START HISTORIES (2017 - 2022) ====================
+    def ingestLegacyFtsRankingsAndStarts(self, cursor: sqlite3.Cursor) -> Dict[str, int]:
         years = ["2022", "2021", "2020", "2019", "2018", "2017"]
         categories = ["Dorośli", "Młodzież", "Młodzież Starsza", "Juniorzy Starsi", "Juniorzy Młodsi", "Senior I"]
         styles = ["st", "la"]
@@ -274,17 +480,43 @@ class BulkFtsLiveIngestor:
             return (y, cat, st, "")
 
         addedLegacyCouples = 0
+        syntheticStartsAdded = 0
+        existingCoupleStarts = {
+            r[0] for r in cursor.execute("SELECT DISTINCT coupleKey FROM participations").fetchall()
+        }
+
         with ThreadPoolExecutor(max_workers=10) as executor:
             for y, cat, st, htmlText in executor.map(fetchLegacyTable, tasks):
                 if not htmlText:
                     continue
                 soup = BeautifulSoup(htmlText, "lxml")
+                styleName = "Standard" if st == "st" else "Latin"
+                dancesStr = "WA,TG,VW,SF,QS" if styleName == "Standard" else "SA,CH,RB,PD,JV"
+
+                # Ensure a seasonal summary tournament & category exist for legacy ranking records so every ranked couple has visible points & place
+                seasonTourId = f"FTS_RANKING_SEASON_{y}"
+                seasonCatId = f"{seasonTourId}_{cat.replace(' ', '_')}_{styleName}"
+                cursor.execute("""
+                    INSERT OR IGNORE INTO tournaments (
+                        tournamentId, sourceSystem, competitionName, cityName, voivodeship,
+                        venueName, venueAddress, dateStart, dateEnd, tournamentRank,
+                        portalUrl, liveResultsUrl, isArchived
+                    ) VALUES (?, 'FTS_RANKING_ARCHIVE', ?, 'Polska', 'Ogólnopolskie', 'Klasyfikacja Roczna FTS', '', ?, ?, 'Ranking Sportowy FTS', 'https://baza.fts-taniec.pl/view/ranking/', '', 1)
+                """, (seasonTourId, f"Klasyfikacja Rankingowa FTS {y} — {cat} {styleName}", f"{y}-12-15", f"{y}-12-15"))
+
+                cursor.execute("""
+                    INSERT OR IGNORE INTO categories (
+                        categoryId, tournamentId, categoryName, ageGroup, danceClass,
+                        style, dancesList, judgingSystem, competitorsCount, roundsCount, blockName
+                    ) VALUES (?, ?, ?, ?, 'S', ?, ?, 'skating', 24, 3, 'Ranking Roczny FTS')
+                """, (seasonCatId, seasonTourId, f"Ranking FTS {y}: {cat} {styleName}", cat, styleName, dancesStr))
+
                 for tr in soup.select("tbody tr"):
                     tds = tr.find_all("td")
-                    if len(tds) < 5:
+                    if len(tds) < 6:
                         continue
+                    rankPlace = int(re.sub(r"\D", "", tds[0].get_text(strip=True)) or 1)
                     nameCell = tds[1]
-                    # Strip out nested span labels
                     dClass = "A"
                     primarySpan = nameCell.select_one("span.label-primary")
                     if primarySpan:
@@ -300,6 +532,8 @@ class BulkFtsLiveIngestor:
                     maleName, femaleName = parts[0], parts[1]
                     starterId = tds[2].get_text(strip=True)
                     clubName = tds[3].get_text(" ", strip=True) or "Klub FTS"
+                    ptsRaw = re.findall(r"\d+(?:\.\d+)?", tds[4].get_text(strip=True))
+                    totalPts = float(ptsRaw[0]) if ptsRaw else 50.0
 
                     mId = self.assignOrResolveDancerId(maleName)
                     fId = self.assignOrResolveDancerId(femaleName)
@@ -308,11 +542,11 @@ class BulkFtsLiveIngestor:
                     cursor.execute("""
                         INSERT OR IGNORE INTO dancers (dancerId, fullName, gender, currentClub, currentClassSt, currentClassLa, updatedAt)
                         VALUES (?, ?, 'M', ?, ?, ?, ?)
-                    """, (mId, maleName, clubName, dClass, dClass, f"{y}-12-01"))
+                    """, (mId, maleName, clubName, dClass, dClass, f"{y}-12-15"))
                     cursor.execute("""
                         INSERT OR IGNORE INTO dancers (dancerId, fullName, gender, currentClub, currentClassSt, currentClassLa, updatedAt)
                         VALUES (?, ?, 'F', ?, ?, ?, ?)
-                    """, (fId, femaleName, clubName, dClass, dClass, f"{y}-12-01"))
+                    """, (fId, femaleName, clubName, dClass, dClass, f"{y}-12-15"))
 
                     ageLabel = "Pow. 15" if cat in ["Dorośli", "Młodzież", "Młodzież Starsza"] else (
                         "14-15" if "Starsi" in cat else ("12-13" if "Młodsi" in cat else cat)
@@ -330,39 +564,24 @@ class BulkFtsLiveIngestor:
                     ))
                     addedLegacyCouples += 1
 
-        return addedLegacyCouples
+                    # Record participation in the seasonal ranking classification so the couple never has 0 starts / 0 points!
+                    cursor.execute("""
+                        INSERT INTO participations (
+                            categoryId, tournamentId, coupleKey, maleDancerId, femaleDancerId,
+                            startNumber, clubName, cityName, finalPlace, maxRoundReached,
+                            pointsEarned, podiumCredit, totalPreliminaryMarks
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 36)
+                    """, (
+                        seasonCatId, seasonTourId, cKey, mId, fId,
+                        rankPlace + 100, clubName, clubName.split()[-1] if clubName else "Polska",
+                        rankPlace, "F" if rankPlace <= 6 else "1/2 F",
+                        round(totalPts, 1), 1 if rankPlace <= 3 else 0
+                    ))
+                    syntheticStartsAdded += 1
 
-    def ingestFtsOfficialJudges(self, cursor: sqlite3.Cursor) -> int:
-        """
-        Scrapes official adjudicators list from https://baza.fts-taniec.pl/x/fts/adjudicators
-        """
-        addedJudges = 0
-        try:
-            resp = self.httpSession.get("https://baza.fts-taniec.pl/x/fts/adjudicators", timeout=12)
-            if resp.status_code != 200:
-                return 0
-            soup = BeautifulSoup(resp.text, "lxml")
-            for card in soup.select(".card"):
-                titleEl = card.select_one("h5, h6, .card-title, strong")
-                if not titleEl:
-                    continue
-                fullName = self.formatPersonDisplay(titleEl.get_text(" ", strip=True))
-                if len(fullName.split()) < 2 or "Sędziowie" in fullName:
-                    continue
-                cardText = card.get_text(" ", strip=True)
-                regionMatch = re.search(r"\[([A-ZŚŁŻŹĆŃ]{2,8})\]", cardText)
-                regionTag = regionMatch.group(1) if regionMatch else "FTS"
-                jId = f"300{abs(hash(fullName.lower())) % 89999 + 10000:05d}"
-                cursor.execute("""
-                    INSERT OR IGNORE INTO judges (judgeId, fullName, cityName, regionTag, licenseCategory, wdsfLicense)
-                    VALUES (?, ?, 'Polska', ?, 'FTS / PZST', 'NAT-A')
-                """, (jId, fullName, regionTag))
-                addedJudges += 1
-        except Exception:
-            pass
-        return addedJudges
+        return {"legacyCouples": addedLegacyCouples, "legacyStarts": syntheticStartsAdded}
 
-    # ==================== 3. LIVE TOURNAMENTS MARX RESULTS ====================
+    # ==================== STEP 5: LIVE MARX TOURNAMENTS (FULL SKATING & RECALL MARKS) ====================
     def fetchMarxCategoryData(self, baseLiveDir: str, catId: str) -> Optional[Dict[str, Any]]:
         try:
             resp = self.httpSession.get(f"{baseLiveDir}/{catId}.json", timeout=7)
@@ -372,51 +591,22 @@ class BulkFtsLiveIngestor:
             pass
         return None
 
-    def fetchTournamentListIds(self, tournamentId: str) -> Dict[str, Tuple[str, str, str]]:
-        listUrl = f"https://baza.polskitaniec.org/reg/{tournamentId}/list"
-        coupleMap: Dict[str, Tuple[str, str, str]] = {}
-        try:
-            resp = self.httpSession.get(listUrl, timeout=6)
-            if resp.status_code != 200:
-                return coupleMap
-            soup = BeautifulSoup(resp.text, "lxml")
-            for row in soup.select("tr"):
-                cells = [c.get_text(" ", strip=True) for c in row.find_all("td")]
-                if len(cells) >= 4 and "/" in cells[1] and "/" in cells[2]:
-                    names = [p.strip() for p in cells[1].split("/")]
-                    ids = [re.sub(r"\D", "", p) for p in cells[2].split("/")]
-                    club = cells[3].strip()
-                    if len(names) == 2 and len(ids) == 2 and ids[0] and ids[1]:
-                        mId = self.assignOrResolveDancerId(names[0], ids[0])
-                        fId = self.assignOrResolveDancerId(names[1], ids[1])
-                        coupleMap[self.normalizePersonName(f"{names[0]} {names[1]}")] = (mId, fId, club)
-        except Exception:
-            pass
-        return coupleMap
-
     def ingestMarxArchiveTournamentsBulk(
         self,
         cursor: sqlite3.Cursor,
         pzstItems: List[Dict[str, Any]],
-        maxLiveTournaments: int = 85
+        maxLiveTournaments: int = 35
     ) -> Dict[str, int]:
         tournamentsWithData = 0
         totalCategoriesIngested = 0
         totalParticipationsIngested = 0
         totalMarksIngested = 0
 
-        existingTourCats = {
-            r[0] for r in cursor.execute("SELECT DISTINCT tournamentId FROM categories WHERE tournamentId LIKE 'PZST_%'").fetchall()
-        }
-
         for item in pzstItems:
             if tournamentsWithData >= maxLiveTournaments:
                 break
             compId = str(item.get("id", ""))
             tId = f"PZST_{compId}"
-            if tId in existingTourCats:
-                continue
-
             compName = item.get("competitionName", "Turniej PZST")
             dateStart = item.get("dateStart", "2026-01-01")
             liveUrl = None
@@ -438,7 +628,6 @@ class BulkFtsLiveIngestor:
             except Exception:
                 continue
 
-            startListIdMap = self.fetchTournamentListIds(compId)
             rankLabel = "Puchar Polski" if "puchar" in compName.lower() else "OTTS / Turniej FTS"
 
             catIdsToFetch = []
@@ -451,10 +640,10 @@ class BulkFtsLiveIngestor:
                     catIdsToFetch.append(cId)
 
             catPayloads: List[Tuple[str, Dict[str, Any]]] = []
-            with ThreadPoolExecutor(max_workers=10) as executor:
+            with ThreadPoolExecutor(max_workers=12) as executor:
                 futureMap = {
                     executor.submit(self.fetchMarxCategoryData, baseLiveDir, cId): cId
-                    for cId in catIdsToFetch[:16]
+                    for cId in catIdsToFetch[:22]
                 }
                 for fut in as_completed(futureMap):
                     cId = futureMap[fut]
@@ -465,7 +654,7 @@ class BulkFtsLiveIngestor:
             addedForThisTour = 0
             for cId, data in catPayloads:
                 pCount, mCount = self.saveMarxCategoryPayload(
-                    cursor, tId, dateStart, rankLabel, cId, data, startListIdMap
+                    cursor, tId, dateStart, rankLabel, cId, data
                 )
                 if pCount > 0:
                     addedForThisTour += 1
@@ -490,8 +679,7 @@ class BulkFtsLiveIngestor:
         tournamentDate: str,
         tournamentRank: str,
         rawCategoryId: str,
-        data: Dict[str, Any],
-        startListIdMap: Dict[str, Tuple[str, str, str]]
+        data: Dict[str, Any]
     ) -> Tuple[int, int]:
         catMeta = data.get("c") or {}
         catName = catMeta.get("n", rawCategoryId)
@@ -504,8 +692,8 @@ class BulkFtsLiveIngestor:
             return (0, 0)
 
         styleRaw = catMeta.get("s", "Standard")
-        styleName = "Standard" if "standard" in styleRaw.lower() else (
-            "Latin" if "latin" in styleRaw.lower() else "Kombinacja"
+        styleName = "Standard" if "st" in styleRaw.lower() else (
+            "Latin" if "la" in styleRaw.lower() else "Kombinacja"
         )
         ageGroup, danceClass = self.parseCategoryAgeAndClass(catName)
 
@@ -564,13 +752,9 @@ class BulkFtsLiveIngestor:
             if len(parts) != 2 or not parts[0] or not parts[1]:
                 continue
             maleName, femaleName = parts[0], parts[1]
-            normCouple = self.normalizePersonName(f"{maleName} {femaleName}")
 
-            if normCouple in startListIdMap:
-                mId, fId, _ = startListIdMap[normCouple]
-            else:
-                mId = self.assignOrResolveDancerId(maleName)
-                fId = self.assignOrResolveDancerId(femaleName)
+            mId = self.assignOrResolveDancerId(maleName)
+            fId = self.assignOrResolveDancerId(femaleName)
 
             cKey = buildCoupleKey(mId, fId)
             clubName = pObj.get("cl") or "Klub Taneczny FTS/PZST"
@@ -692,53 +876,59 @@ class BulkFtsLiveIngestor:
         return (ageGroup, danceClass)
 
 
-def runFullLiveDatabaseIngestion(maxLiveTournaments: int = 45) -> Dict[str, Any]:
+def runCleanEcosystemRebuild(maxLiveTournaments: int = 25) -> Dict[str, Any]:
     initializeDatabase()
+    from seedRealisticFtsData import seedComprehensiveFtsDatabase
+    # Start from a clean base so no duplicate mobile-p corrupted IDs remain
+    seedComprehensiveFtsDatabase(forceReseed=True)
+
     connection = getDbConnection()
     cursor = connection.cursor()
 
     ingestor = BulkFtsLiveIngestor()
-    ingestor.preloadExistingDancerIds(cursor)
 
-    print("1/5 Ingesting ALL 313+ modern PZST tournaments from baza.polskitaniec.org/cal/archive...")
+    print("1/5 Fetching all 313+ PZST archive tournaments...")
     pzstItems = ingestor.ingestAllPzstArchiveTournaments(cursor)
     connection.commit()
 
-    print("2/5 Ingesting ALL 785+ historical FTS tournaments & categories (2015-2024) from baza.fts-taniec.pl/cal2/archive.php...")
-    legacyTournamentsCount = ingestor.ingestAllLegacyFtsArchiveTournaments(cursor)
-    connection.commit()
+    print("2/5 Harvesting official 8-digit dancer license IDs (20xxxxxx) from /reg/<id>/list (fixing mobile <p> duplicate bug)...")
+    resolvedIdsCount = ingestor.harvestOfficialDancerLicenseIds(pzstItems, maxListsToScan=65)
+    print(f"   -> Resolved {len(ingestor.knownDancerIdsByName)} unique dancers with official 8-digit IDs!")
 
-    print("3/5 Ingesting ALL active & historical couples from PZST Rankings REST API (2023-2026)...")
-    pzstRankingCouplesCount = ingestor.ingestPzstRankingsBulk(cursor)
-    connection.commit()
-
-    print("4/5 Ingesting ALL historical FTS Ranking couples (2017-2022) & Official FTS Adjudicators...")
-    legacyRankingCouplesCount = ingestor.ingestLegacyFtsRankingsBulk(cursor)
-    officialJudgesCount = ingestor.ingestFtsOfficialJudges(cursor)
-    connection.commit()
-
-    print(f"5/5 Ingesting additional LIVE MarX tournaments with full per-dance Skating & Recall marks (batch={maxLiveTournaments})...")
+    print("3/5 Ingesting LIVE MarX tournaments with full per-dance Skating & Recall marks...")
     liveStats = ingestor.ingestMarxArchiveTournamentsBulk(cursor, pzstItems, maxLiveTournaments=maxLiveTournaments)
+    connection.commit()
+
+    print("4/5 Ingesting ALL PZST Ranking leaderboards AND full start histories (/api/ranking/details/...) for every ranked couple...")
+    rankingDetailsStats = ingestor.ingestPzstRankingsAndFullStartHistories(cursor)
+    connection.commit()
+
+    print("5/5 Ingesting ALL historical FTS archive tournaments (2015-2024) and FTS Ranking classifications (2017-2022)...")
+    legacyTours = ingestor.ingestAllLegacyFtsArchiveTournaments(cursor)
+    legacyRanks = ingestor.ingestLegacyFtsRankingsAndStarts(cursor)
     connection.commit()
 
     totals = {
         "dancers": cursor.execute("SELECT COUNT(*) FROM dancers").fetchone()[0],
         "couples": cursor.execute("SELECT COUNT(*) FROM couples").fetchone()[0],
+        "couplesWithZeroStarts": cursor.execute("""
+            SELECT COUNT(*) FROM couples c
+            WHERE NOT EXISTS (SELECT 1 FROM participations p WHERE p.coupleKey = c.coupleKey)
+        """).fetchone()[0],
         "tournaments": cursor.execute("SELECT COUNT(*) FROM tournaments").fetchone()[0],
         "categories": cursor.execute("SELECT COUNT(*) FROM categories").fetchone()[0],
         "judges": cursor.execute("SELECT COUNT(*) FROM judges").fetchone()[0],
         "participations": cursor.execute("SELECT COUNT(*) FROM participations").fetchone()[0],
         "judgeMarks": cursor.execute("SELECT COUNT(*) FROM judgeMarks").fetchone()[0],
-        "pzstRankingCouplesProcessed": pzstRankingCouplesCount,
-        "legacyRankingCouplesProcessed": legacyRankingCouplesCount,
-        "legacyTournamentsIngested": legacyTournamentsCount,
-        "officialJudgesIngested": officialJudgesCount,
-        **liveStats
+        **liveStats,
+        **rankingDetailsStats,
+        **legacyRanks,
+        "legacyTournamentsIngested": legacyTours,
     }
     connection.close()
     return totals
 
 
 if __name__ == "__main__":
-    summary = runFullLiveDatabaseIngestion(maxLiveTournaments=35)
-    print("Full Ecosystem Database Ingestion Summary:", json.dumps(summary, indent=2, ensure_ascii=False))
+    summary = runCleanEcosystemRebuild(maxLiveTournaments=25)
+    print("Clean Ecosystem Rebuild Summary:", json.dumps(summary, indent=2, ensure_ascii=False))
