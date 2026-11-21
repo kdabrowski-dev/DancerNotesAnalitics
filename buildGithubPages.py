@@ -46,7 +46,10 @@ def buildStaticGithubPagesBundle() -> None:
         ORDER BY c.isActive DESC, totalPoints DESC
     """).fetchall()]
 
-    categoriesIds = [r["categoryId"] for r in cursor.execute("SELECT categoryId FROM categories").fetchall()]
+    categoriesIds = [
+        r["categoryId"]
+        for r in cursor.execute("SELECT DISTINCT categoryId FROM participations").fetchall()
+    ]
     judgesIds = [r["judgeId"] for r in cursor.execute("SELECT judgeId FROM judges").fetchall()]
 
     judgesCatalog = [dict(r) for r in cursor.execute("""
