@@ -50,14 +50,23 @@ def buildCoupleKey(maleId: str, femaleId: str) -> str:
 
 
 def calculateFtsPoints(finalPlace: int, competitorsCount: int, rankMultiplier: float = 1.0) -> Tuple[float, int]:
-    if competitorsCount <= 1 or finalPlace > competitorsCount:
+    """
+    Calculates official PZST / FTS Class Points (Punkty Klasowe 'Pkt. kl.') and Podium Credits ('M1'):
+    - Base points = max(0, competitorsCount - finalPlace) + 5  (if finalPlace < competitorsCount, else 0)
+    - Podium bonus (only when competitorsCount >= 6): 1st = +15 (M1), 2nd = +10 (M1), 3rd = +5 (M1)
+    - Multiplied by class multiplier (typically 1.0)
+    """
+    if competitorsCount <= 1 or finalPlace >= competitorsCount:
         return (0.0, 0)
-    beatenCouples = max(0, competitorsCount - finalPlace)
-    basePoints = float(beatenCouples * 2)
-    podiumBonus = {1: 15.0, 2: 10.0, 3: 6.0, 4: 3.0, 5: 2.0, 6: 1.0}.get(finalPlace, 0.0)
-    totalPoints = round((basePoints + podiumBonus) * rankMultiplier, 1)
-    podiumCredit = 1 if (finalPlace <= 3 and competitorsCount >= 6) else 0
-    return (totalPoints, podiumCredit)
+    beatenCouples = competitorsCount - finalPlace
+    basePoints = float(beatenCouples + 5)
+    podiumBonus = 0.0
+    podiumCredit = 0
+    if competitorsCount >= 6 and finalPlace <= 3:
+        podiumBonus = {1: 15.0, 2: 10.0, 3: 5.0}.get(finalPlace, 0.0)
+        podiumCredit = 1
+    totalClassPoints = round((basePoints + podiumBonus) * rankMultiplier, 2)
+    return (totalClassPoints, podiumCredit)
 
 
 def normalizeDanceCode(rawDanceCode: str) -> str:

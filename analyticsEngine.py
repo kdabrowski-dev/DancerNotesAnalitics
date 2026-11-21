@@ -5,9 +5,9 @@ from databaseManager import getDbConnection
 
 CLASS_PROMOTION_THRESHOLDS = {
     "E": {"nextClass": "D", "requiredPoints": 100.0, "requiredPodiums": 3},
-    "D": {"nextClass": "C", "requiredPoints": 150.0, "requiredPodiums": 5},
-    "C": {"nextClass": "B", "requiredPoints": 200.0, "requiredPodiums": 5},
-    "B": {"nextClass": "A", "requiredPoints": 250.0, "requiredPodiums": 5},
+    "D": {"nextClass": "C", "requiredPoints": 200.0, "requiredPodiums": 5},
+    "C": {"nextClass": "B", "requiredPoints": 200.0, "requiredPodiums": 7},
+    "B": {"nextClass": "A", "requiredPoints": 200.0, "requiredPodiums": 7},
     "A": {"nextClass": "S", "requiredPoints": 300.0, "requiredPodiums": 6},
     "S": {"nextClass": "S (Master)", "requiredPoints": 500.0, "requiredPodiums": 10},
 }
@@ -332,14 +332,16 @@ def getCoupleDeepAnalytics(coupleKey: str) -> Dict[str, Any]:
 
     # Judge-by-Judge Scoring & Bias Matrix for this couple
     # Compares each judge's mark for this couple in each dance against the panel average in that same category+dance!
+    # Also includes judges who evaluated this couple in preliminary rounds (RECALL) even if no SKATING marks exist!
     judgeMatrixRows = cursor.execute("""
         WITH PanelConsensus AS (
             SELECT
                 categoryId,
                 danceCode,
-                AVG(markValue) AS panelAvgMark
+                AVG(CASE WHEN markType = 'SKATING' THEN markValue END) AS panelAvgMark,
+                AVG(CASE WHEN markType = 'RECALL' THEN markValue END) AS panelAvgRecall
             FROM judgeMarks
-            WHERE coupleKey = ? AND markType = 'SKATING'
+            WHERE coupleKey = ?
             GROUP BY categoryId, danceCode
         )
         SELECT
@@ -348,16 +350,27 @@ def getCoupleDeepAnalytics(coupleKey: str) -> Dict[str, Any]:
             j.cityName AS judgeCity,
             j.regionTag,
             j.wdsfLicense,
-            COUNT(jm.markId) AS totalSkatingMarksGiven,
-            ROUND(AVG(jm.markValue), 2) AS avgMarkGiven,
-            ROUND(AVG(pc.panelAvgMark), 2) AS avgPanelConsensus,
-            ROUND(AVG(jm.markValue - pc.panelAvgMark), 2) AS biasDelta,
-            SUM(CASE WHEN jm.markValue = 1 THEN 1 ELSE 0 END) AS firstPlacesGiven,
-            SUM(CASE WHEN jm.markValue <= 3 THEN 1 ELSE 0 END) AS top3MarksGiven
+            COUNT(CASE WHEN jm.markType = 'SKATING' THEN 1 END) AS totalSkatingMarksGiven,
+            COUNT(jm.markId) AS totalMarksAllRounds,
+            COALESCE(
+                ROUND(AVG(CASE WHEN jm.markType = 'SKATING' THEN jm.markValue END), 2),
+                ROUND(6.0 - 5.0 * AVG(CASE WHEN jm.markType = 'RECALL' THEN jm.markValue END), 2)
+            ) AS avgMarkGiven,
+            COALESCE(
+                ROUND(AVG(CASE WHEN jm.markType = 'SKATING' THEN pc.panelAvgMark END), 2),
+                ROUND(6.0 - 5.0 * AVG(CASE WHEN jm.markType = 'RECALL' THEN pc.panelAvgRecall END), 2)
+            ) AS avgPanelConsensus,
+            COALESCE(
+                ROUND(AVG(CASE WHEN jm.markType = 'SKATING' THEN (jm.markValue - pc.panelAvgMark) END), 2),
+                ROUND(AVG(CASE WHEN jm.markType = 'RECALL' THEN (pc.panelAvgRecall - jm.markValue) * 3.0 END), 2),
+                0.0
+            ) AS biasDelta,
+            SUM(CASE WHEN jm.markType = 'SKATING' AND jm.markValue = 1 THEN 1 ELSE 0 END) AS firstPlacesGiven,
+            SUM(CASE WHEN jm.markType = 'SKATING' AND jm.markValue <= 3 THEN 1 ELSE 0 END) AS top3MarksGiven
         FROM judgeMarks jm
         JOIN judges j ON j.judgeId = jm.judgeId
         JOIN PanelConsensus pc ON pc.categoryId = jm.categoryId AND pc.danceCode = jm.danceCode
-        WHERE jm.coupleKey = ? AND jm.markType = 'SKATING'
+        WHERE jm.coupleKey = ?
         GROUP BY j.judgeId
         ORDER BY biasDelta ASC
     """, (coupleKey, coupleKey)).fetchall()
@@ -376,6 +389,12 @@ def getCoupleDeepAnalytics(coupleKey: str) -> Dict[str, Any]:
         judgeEvaluations.append(jDict)
 
     # Class Promotion Tracker (Ścieżka awansu klasowego FTS/PZST)
+    # Prefer official classPointsSt / classPodiumsSt extracted from PZST *_punkty.pdf + official formula!
+    finalClassPointsSt = round(float(coupleInfo["classPointsSt"]), 2) if coupleInfo.get("classPointsSt") is not None else cumulativePointsSt
+    finalClassPodiumsSt = int(coupleInfo["classPodiumsSt"]) if coupleInfo.get("classPodiumsSt") is not None else podiumCreditsSt
+    finalClassPointsLa = round(float(coupleInfo["classPointsLa"]), 2) if coupleInfo.get("classPointsLa") is not None else cumulativePointsLa
+    finalClassPodiumsLa = int(coupleInfo["classPodiumsLa"]) if coupleInfo.get("classPodiumsLa") is not None else podiumCreditsLa
+
     classSt = coupleInfo.get("classSt", "C")
     classLa = coupleInfo.get("classLa", "C")
     promoStSpec = CLASS_PROMOTION_THRESHOLDS.get(classSt, CLASS_PROMOTION_THRESHOLDS["A"])
@@ -385,22 +404,24 @@ def getCoupleDeepAnalytics(coupleKey: str) -> Dict[str, Any]:
         "Standard": {
             "currentClass": classSt,
             "targetClass": promoStSpec["nextClass"],
-            "earnedPoints": cumulativePointsSt,
+            "earnedPoints": finalClassPointsSt,
             "requiredPoints": promoStSpec["requiredPoints"],
-            "pointsCompletionPct": min(100.0, round((cumulativePointsSt / promoStSpec["requiredPoints"]) * 100.0, 1)),
-            "earnedPodiums": podiumCreditsSt,
+            "pointsCompletionPct": min(100.0, round((finalClassPointsSt / promoStSpec["requiredPoints"]) * 100.0, 1)),
+            "earnedPodiums": finalClassPodiumsSt,
             "requiredPodiums": promoStSpec["requiredPodiums"],
-            "podiumsCompletionPct": min(100.0, round((podiumCreditsSt / float(promoStSpec["requiredPodiums"])) * 100.0, 1)),
+            "podiumsCompletionPct": min(100.0, round((finalClassPodiumsSt / float(promoStSpec["requiredPodiums"])) * 100.0, 1)),
+            "officialSummaryCode": f"ST: {classSt} | {finalClassPointsSt:.2f}M{finalClassPodiumsSt}",
         },
         "Latin": {
             "currentClass": classLa,
             "targetClass": promoLaSpec["nextClass"],
-            "earnedPoints": cumulativePointsLa,
+            "earnedPoints": finalClassPointsLa,
             "requiredPoints": promoLaSpec["requiredPoints"],
-            "pointsCompletionPct": min(100.0, round((cumulativePointsLa / promoLaSpec["requiredPoints"]) * 100.0, 1)),
-            "earnedPodiums": podiumCreditsLa,
+            "pointsCompletionPct": min(100.0, round((finalClassPointsLa / promoLaSpec["requiredPoints"]) * 100.0, 1)),
+            "earnedPodiums": finalClassPodiumsLa,
             "requiredPodiums": promoLaSpec["requiredPodiums"],
-            "podiumsCompletionPct": min(100.0, round((podiumCreditsLa / float(promoLaSpec["requiredPodiums"])) * 100.0, 1)),
+            "podiumsCompletionPct": min(100.0, round((finalClassPodiumsLa / float(promoLaSpec["requiredPodiums"])) * 100.0, 1)),
+            "officialSummaryCode": f"LA: {classLa} | {finalClassPointsLa:.2f}M{finalClassPodiumsLa}",
         }
     }
 

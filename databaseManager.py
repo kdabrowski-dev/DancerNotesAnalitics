@@ -42,6 +42,10 @@ def initializeDatabase() -> None:
         ageGroup TEXT,
         classSt TEXT,
         classLa TEXT,
+        classPointsSt REAL DEFAULT NULL,
+        classPodiumsSt INTEGER DEFAULT NULL,
+        classPointsLa REAL DEFAULT NULL,
+        classPodiumsLa INTEGER DEFAULT NULL,
         firstTournamentDate TEXT,
         lastTournamentDate TEXT,
         isActive INTEGER DEFAULT 1,
@@ -113,6 +117,7 @@ def initializeDatabase() -> None:
         finalPlace INTEGER NOT NULL,
         maxRoundReached TEXT,
         pointsEarned REAL DEFAULT 0,
+        rankingPointsEarned REAL DEFAULT 0,
         podiumCredit INTEGER DEFAULT 0,
         totalPreliminaryMarks INTEGER DEFAULT 0,
         FOREIGN KEY (categoryId) REFERENCES categories(categoryId),
@@ -146,6 +151,18 @@ def initializeDatabase() -> None:
     CREATE INDEX IF NOT EXISTS idx_judgemarks_judge ON judgeMarks(judgeId);
     CREATE INDEX IF NOT EXISTS idx_judgemarks_category ON judgeMarks(categoryId);
     """)
+
+    for alterStmt in [
+        "ALTER TABLE couples ADD COLUMN classPointsSt REAL DEFAULT NULL;",
+        "ALTER TABLE couples ADD COLUMN classPodiumsSt INTEGER DEFAULT NULL;",
+        "ALTER TABLE couples ADD COLUMN classPointsLa REAL DEFAULT NULL;",
+        "ALTER TABLE couples ADD COLUMN classPodiumsLa INTEGER DEFAULT NULL;",
+        "ALTER TABLE participations ADD COLUMN rankingPointsEarned REAL DEFAULT 0;"
+    ]:
+        try:
+            cursor.execute(alterStmt)
+        except Exception:
+            pass
 
     connection.commit()
     connection.close()

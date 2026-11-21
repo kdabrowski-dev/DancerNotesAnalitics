@@ -51,11 +51,12 @@ function resolveFromStaticBundle(endpointUrl) {
     const parts = pathPart.replace('/api/couple/', '').split('/judge/');
     const cKey = decodeURIComponent(parts[0]);
     const jId = decodeURIComponent(parts[1]);
-    return b.coupleJudgeHistoryMap[`${cKey}__${jId}`] || {
-      couple: b.couplesMap[cKey]?.couple || {},
-      judge: b.judgesMap[jId]?.selectedJudgeDetail?.judge || {},
-      timelineEvents: [],
-      perDanceSummary: [],
+    const stored = b.coupleJudgeHistoryMap?.[`${cKey}__${jId}`];
+    return {
+      couple: stored?.couple || b.couplesMap[cKey]?.couple || {},
+      judge: stored?.judge || b.judgesMap[jId]?.selectedJudgeDetail?.judge || {},
+      timelineEvents: stored?.timelineEvents || [],
+      perDanceSummary: stored?.perDanceSummary || [],
     };
   }
 
@@ -298,13 +299,12 @@ async function initApplication() {
     await filterTournaments();
     await loadJudgeAnalytics();
 
-    // Automatically check baza.polskitaniec.org/cal/archive in the background on startup (including on GitHub Pages!)
-    // so any brand-new tournaments or live results published today are pulled dynamically by the browser!
-    if (typeof runBrowserLiveFtsSync === 'function') {
-      runBrowserLiveFtsSync(2).then((liveRes) => {
+    // Automatically check baza.polskitaniec.org/cal/archive in the background on startup (only on GitHub Pages!)
+    // without resetting the user's currently selected couple or tab!
+    if (window.location.hostname.includes('github.io') && typeof runBrowserLiveFtsSync === 'function') {
+      runBrowserLiveFtsSync(0).then((liveRes) => {
         if (liveRes && liveRes.newTournamentsAdded > 0) {
           console.log('Dynamically pulled new live tournaments from baza.polskitaniec.org:', liveRes);
-          initApplication();
         }
       });
     }
@@ -479,11 +479,11 @@ function setupUniversalSearchBoxes() {
         <div>
           <span class="font-bold text-white">${c.coupleName}</span>
           <span class="ml-2 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 font-mono text-[10px]">${c.coupleKey}</span>
-          <div class="text-[11px] text-gray-400">${c.clubName} (${c.cityName || 'Polska'}) • ${c.ageGroup} • ST:${c.classSt} LA:${c.classLa}</div>
+          <div class="text-[11px] text-gray-400">${c.clubName} (${c.cityName || 'Polska'}) • ${c.ageGroup}</div>
         </div>
         <div class="text-right font-mono text-[11px]">
-          <div class="text-amber-300 font-bold">${c.totalPoints || 0} pkt</div>
-          <div class="text-gray-400">${c.startsCount || 0} startów</div>
+          <div class="text-amber-300 font-bold">ST: ${c.classSt} | ${c.classPointsSt != null ? Number(c.classPointsSt).toFixed(2) + 'M' + (c.classPodiumsSt || 0) : (c.totalPoints || 0) + ' pkt'}</div>
+          <div class="text-indigo-300 font-bold">LA: ${c.classLa} | ${c.classPointsLa != null ? Number(c.classPointsLa).toFixed(2) + 'M' + (c.classPodiumsLa || 0) : c.startsCount + ' startów'}</div>
         </div>
       </div>`,
     onSelectFn: (c, inputEl) => {
@@ -760,6 +760,12 @@ async function loadCoupleAnalytics(coupleKey) {
           <span class="px-2.5 py-0.5 rounded-full text-xs font-mono bg-gray-800 text-gray-300">
             Starter ID: ${c.starterId || 'PZST'}
           </span>
+          <span class="px-2.5 py-0.5 rounded-full text-xs font-mono bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold">
+            ${data.promotionProgress?.Standard?.officialSummaryCode || `ST: ${c.classSt}`}
+          </span>
+          <span class="px-2.5 py-0.5 rounded-full text-xs font-mono bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 font-bold">
+            ${data.promotionProgress?.Latin?.officialSummaryCode || `LA: ${c.classLa}`}
+          </span>
         </div>
         <h2 class="text-2xl font-extrabold text-white mt-2">${c.coupleName}</h2>
         <p class="text-xs text-gray-400 mt-1">
@@ -988,11 +994,12 @@ async function loadCoupleAnalytics(coupleKey) {
         <div class="p-4 rounded-xl bg-obsidian/80 border border-gray-800 space-y-2.5">
           <div class="flex items-center justify-between">
             <span class="font-bold text-sm text-white">${styleKey} — Klasa ${p.currentClass} → Awans do Klasy ${p.targetClass}</span>
-            <span class="text-xs font-mono text-amber-400">${p.pointsCompletionPct}% pkt</span>
+            <span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-xs font-mono font-bold border border-amber-500/30">${p.officialSummaryCode || `${p.earnedPoints}M${p.earnedPodiums}`}</span>
           </div>
           <div>
             <div class="flex justify-between text-[11px] text-gray-400 mb-1">
-              <span>Punkty FTS/PZST: <strong class="text-white mono-num">${p.earnedPoints} / ${p.requiredPoints} pkt</strong></span>
+              <span>Punkty Klasowe (Pkt. kl.): <strong class="text-white mono-num">${Number(p.earnedPoints).toFixed(2)} / ${p.requiredPoints} pkt</strong></span>
+              <span class="mono-num text-amber-400">${p.pointsCompletionPct}%</span>
             </div>
             <div class="w-full h-2.5 bg-gray-800 rounded-full overflow-hidden">
               <div class="h-full bg-gradient-to-r from-amber-500 to-emerald-400 rounded-full" style="width: ${p.pointsCompletionPct}%"></div>
@@ -1000,7 +1007,7 @@ async function loadCoupleAnalytics(coupleKey) {
           </div>
           <div>
             <div class="flex justify-between text-[11px] text-gray-400 mb-1">
-              <span>Miejsca na Podium (min. 6 par): <strong class="text-white mono-num">${p.earnedPodiums} / ${p.requiredPodiums} podium</strong></span>
+              <span>Miejsca na Podium (M): <strong class="text-white mono-num">${p.earnedPodiums} / ${p.requiredPodiums} (M${p.earnedPodiums})</strong></span>
               <span class="mono-num text-indigo-300">${p.podiumsCompletionPct}%</span>
             </div>
             <div class="w-full h-2 bg-gray-800 rounded-full overflow-hidden">
@@ -1016,18 +1023,24 @@ async function loadCoupleAnalytics(coupleKey) {
   const judgeEvals = data.judgeEvaluations || [];
   const specificJudgeSelect = document.getElementById('coupleSpecificJudgeDropdown');
   if (specificJudgeSelect) {
-    specificJudgeSelect.innerHTML = judgeEvals
-      .map(
-        (j) =>
-          `<option value="${j.judgeId}">${j.judgeName} (${j.judgeCity}) — Śr: ${j.avgMarkGiven} (Δ ${j.biasDelta > 0 ? '+' : ''}${j.biasDelta})</option>`
-      )
-      .join('');
+    if (judgeEvals.length > 0) {
+      specificJudgeSelect.innerHTML = judgeEvals
+        .map(
+          (j) =>
+            `<option value="${j.judgeId}">${j.judgeName} (${j.judgeCity}) — Śr: ${j.avgMarkGiven} (Δ ${j.biasDelta > 0 ? '+' : ''}${j.biasDelta})</option>`
+        )
+        .join('');
+    } else {
+      specificJudgeSelect.innerHTML = `<option value="">Brak ocen sędziowskich dla tej pary</option>`;
+    }
   }
 
-  document.getElementById('coupleJudgesTableBody').innerHTML = judgeEvals
-    .map((j) => {
-      const delta = Number(j.biasDelta);
-      return `
+  document.getElementById('coupleJudgesTableBody').innerHTML =
+    judgeEvals.length > 0
+      ? judgeEvals
+          .map((j) => {
+            const delta = Number(j.biasDelta);
+            return `
         <tr id="coupleJudgeRow-${j.judgeId}"
             onclick="loadCoupleJudgeHistory('${coupleKey}', '${j.judgeId}')"
             class="hover:bg-amber-500/15 cursor-pointer transition">
@@ -1042,11 +1055,17 @@ async function loadCoupleAnalytics(coupleKey) {
             ${delta > 0 ? '+' : ''}${j.biasDelta}
           </td>
         </tr>`;
-    })
-    .join('');
+          })
+          .join('')
+      : `<tr><td colspan="5" class="py-8 text-center text-xs text-gray-400">Brak szczegółowych arkuszy ocen sędziowskich (Skating / Recall) dla tej pary.</td></tr>`;
 
   if (judgeEvals.length > 0) {
     await loadCoupleJudgeHistory(coupleKey, judgeEvals[0].judgeId);
+  } else {
+    if (coupleSingleJudgeHistoryChartInstance) coupleSingleJudgeHistoryChartInstance.destroy();
+    if (coupleSingleJudgeDanceChartInstance) coupleSingleJudgeDanceChartInstance.destroy();
+    document.getElementById('coupleJudgeDrilldownHeader').innerHTML = `<div class="text-xs text-gray-400">Brak danych sędziowskich dla tej pary.</div>`;
+    document.getElementById('coupleSingleJudgeEventsList').innerHTML = '';
   }
 
   // Starts History Table
@@ -1255,9 +1274,15 @@ async function loadCoupleJudgeHistory(coupleKey, judgeId) {
               </span>`
               )
               .join('')}
-            <span class="px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-300 font-mono text-[10px]">
-              Krzyżyki 1/2F: ${ev.judgeRecallPct}%
-            </span>
+            ${
+              ev.judgeRecallPct != null
+                ? `<span class="px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-300 font-mono text-[10px]">
+                    Krzyżyki 1/2F: ${ev.judgeRecallPct}%
+                  </span>`
+                : `<span class="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 font-mono text-[10px]">
+                    Finał bezpośredni (Skating)
+                  </span>`
+            }
           </div>
         </div>`;
     })

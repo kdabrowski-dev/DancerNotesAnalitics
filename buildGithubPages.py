@@ -109,7 +109,7 @@ def buildStaticGithubPagesBundle() -> None:
     """).fetchall()]
 
     validCoupleJudgePairs = cursor.execute("""
-        SELECT DISTINCT coupleKey, judgeId FROM judgeMarks WHERE markType = 'SKATING'
+        SELECT DISTINCT coupleKey, judgeId FROM judgeMarks
     """).fetchall()
 
     connection.close()
@@ -125,9 +125,13 @@ def buildStaticGithubPagesBundle() -> None:
         cKey, jId = row["coupleKey"], row["judgeId"]
         hist = getCoupleJudgeHistoryTimeline(cKey, jId)
         if hist and not hist.get("error") and hist.get("timelineEvents"):
-            coupleJudgeHistoryMap[f"{cKey}__{jId}"] = hist
+            # Strip duplicate couple/judge metadata inside each entry to keep bundle ultra-compact
+            coupleJudgeHistoryMap[f"{cKey}__{jId}"] = {
+                "timelineEvents": hist["timelineEvents"],
+                "perDanceSummary": hist["perDanceSummary"],
+            }
 
-    fullStaticBundle = {
+    mainStaticBundle = {
         "overview": getDashboardOverview(),
         "catalog": {
             "dancers": dancers,
@@ -141,7 +145,7 @@ def buildStaticGithubPagesBundle() -> None:
         "categoriesMap": categoriesDetailsMap,
         "judgesDefault": getJudgesGlobalAnalytics(selectedJudgeId=None),
         "judgesMap": judgesAnalyticsMap,
-        "coupleJudgeHistoryMap": coupleJudgeHistoryMap,
+        "coupleJudgeHistoryMap": {},
         "allParticipations": allParticipations,
         "allSkatingMarks": allSkatingMarks,
     }
@@ -152,16 +156,27 @@ def buildStaticGithubPagesBundle() -> None:
     os.makedirs(staticDir, exist_ok=True)
     os.makedirs(docsDir, exist_ok=True)
 
-    bundleJsContent = "window.FTS_STATIC_BUNDLE=" + json.dumps(fullStaticBundle, ensure_ascii=False, separators=(",", ":")) + ";\n"
+    mainBundleJs = "window.FTS_STATIC_BUNDLE=" + json.dumps(mainStaticBundle, ensure_ascii=False, separators=(",", ":")) + ";\n"
+    historyBundleJs = (
+        "if(window.FTS_STATIC_BUNDLE){window.FTS_STATIC_BUNDLE.coupleJudgeHistoryMap="
+        + json.dumps(coupleJudgeHistoryMap, ensure_ascii=False, separators=(",", ":"))
+        + ";}\n"
+    )
 
     with open(os.path.join(staticDir, "ftsStaticData.js"), "w", encoding="utf-8") as fStatic:
-        fStatic.write(bundleJsContent)
+        fStatic.write(mainBundleJs)
+    with open(os.path.join(staticDir, "ftsStaticHistory.js"), "w", encoding="utf-8") as fHist:
+        fHist.write(historyBundleJs)
 
     for targetFolder in [baseDir, docsDir]:
         shutil.copyfile(os.path.join(staticDir, "ftsStaticData.js"), os.path.join(targetFolder, "ftsStaticData.js"))
+        shutil.copyfile(os.path.join(staticDir, "ftsStaticHistory.js"), os.path.join(targetFolder, "ftsStaticHistory.js"))
         shutil.copyfile(os.path.join(staticDir, "liveBrowserSync.js"), os.path.join(targetFolder, "liveBrowserSync.js"))
-        shutil.copyfile(os.path.join(staticDir, "index.html"), os.path.join(targetFolder, "index.html"))
         shutil.copyfile(os.path.join(staticDir, "appClient.js"), os.path.join(targetFolder, "appClient.js"))
+        with open(os.path.join(staticDir, "index.html"), "r", encoding="utf-8") as fHtmlIn:
+            ghPagesHtml = fHtmlIn.read().replace('src="/static/', 'src="./')
+        with open(os.path.join(targetFolder, "index.html"), "w", encoding="utf-8") as fHtmlOut:
+            fHtmlOut.write(ghPagesHtml)
         with open(os.path.join(targetFolder, ".nojekyll"), "w", encoding="utf-8") as fNoJekyll:
             fNoJekyll.write("")
 

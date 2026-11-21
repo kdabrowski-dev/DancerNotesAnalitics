@@ -350,10 +350,12 @@ class BulkFtsLiveIngestor:
                     ))
                     categoriesAddedFromDetails += 1
 
-                    # Insert primary couple's start
+                    # Insert primary couple's start using OFFICIAL PZST Class Points (Pkt. kl.) formula
+                    # and store Ranking Sportowy points separately in rankingPointsEarned!
                     placeVal = int(dItem.get("place") or 1)
-                    pointsVal = float(dItem.get("points") or 0.0)
-                    podiumCred = 1 if (placeVal <= 3 and entriesCount >= 6) else 0
+                    rankingPointsVal = float(dItem.get("points") or 0.0)
+                    classMult = float(((catObj.get("competitionType") or {}).get("multipliers") or {}).get("class") or 1.0)
+                    classPointsVal, podiumCred = calculateFtsPoints(placeVal, max(entriesCount, placeVal), classMult)
                     maxRnd = "F" if placeVal <= 6 else ("1/2 F" if placeVal <= 12 else "1/4 F")
 
                     if (fullCatId, primaryCoupleKey) not in existingPartSet:
@@ -365,22 +367,23 @@ class BulkFtsLiveIngestor:
                             INSERT INTO participations (
                                 categoryId, tournamentId, coupleKey, maleDancerId, femaleDancerId,
                                 startNumber, clubName, cityName, finalPlace, maxRoundReached,
-                                pointsEarned, podiumCredit, totalPreliminaryMarks
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                pointsEarned, rankingPointsEarned, podiumCredit, totalPreliminaryMarks
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             fullCatId, tId, primaryCoupleKey, primaryMaleId, primaryFemaleId,
                             placeVal + 100, clName, ciName, placeVal, maxRnd,
-                            pointsVal, podiumCred, max(15, 45 - placeVal * 2)
+                            classPointsVal, rankingPointsVal, podiumCred, max(15, 45 - placeVal * 2)
                         ))
                         startsAddedFromDetails += 1
                     else:
-                        # Update existing participation with official PZST ranking points if official points are higher!
                         cursor.execute("""
                             UPDATE participations
-                            SET pointsEarned = MAX(pointsEarned, ?),
+                            SET pointsEarned = ?,
+                                rankingPointsEarned = ?,
+                                podiumCredit = ?,
                                 finalPlace = ?
                             WHERE categoryId = ? AND coupleKey = ?
-                        """, (pointsVal, placeVal, fullCatId, primaryCoupleKey))
+                        """, (classPointsVal, rankingPointsVal, podiumCred, placeVal, fullCatId, primaryCoupleKey))
 
                     # Update couple date bounds & class
                     cursor.execute("""
@@ -581,6 +584,207 @@ class BulkFtsLiveIngestor:
 
         return {"legacyCouples": addedLegacyCouples, "legacyStarts": syntheticStartsAdded}
 
+    # ==================== STEP 4B: INGEST MISSING MARX CATEGORY JSONs FOR RANKED COUPLES ====================
+    def ingestMissingMarxCategoryMarksForParticipations(self, cursor: sqlite3.Cursor, maxCategoriesToFetch: int = 380) -> Dict[str, int]:
+        """
+        Finds categories in `participations` that belong to a tournament with a `liveResultsUrl`
+        but do not yet have any `judgeMarks` in the database, and fetches their exact
+        `<baseLiveDir>/PZST_category_<id>.json` so every couple gets their full per-dance Radar
+        and Judge Evaluation / Bias History!
+        """
+        missingRows = cursor.execute("""
+            SELECT
+                cat.categoryId,
+                cat.tournamentId,
+                t.dateStart,
+                t.tournamentRank,
+                t.liveResultsUrl,
+                COUNT(p.participationId) AS partCount
+            FROM categories cat
+            JOIN tournaments t ON t.tournamentId = cat.tournamentId
+            JOIN participations p ON p.categoryId = cat.categoryId
+            WHERE t.liveResultsUrl != ''
+              AND (t.liveResultsUrl LIKE '%index.php' OR t.liveResultsUrl LIKE '%index.html')
+              AND NOT EXISTS (SELECT 1 FROM judgeMarks jm WHERE jm.categoryId = cat.categoryId)
+            GROUP BY cat.categoryId
+            ORDER BY t.dateStart DESC, partCount DESC
+            LIMIT ?
+        """, (maxCategoriesToFetch,)).fetchall()
+
+        tasks = []
+        for r in missingRows:
+            fullCatId = r["categoryId"]
+            tId = r["tournamentId"]
+            rawCatId = fullCatId.replace(f"{tId}_", "")
+            baseLiveDir = r["liveResultsUrl"].rsplit("/", 1)[0]
+            tasks.append((tId, r["dateStart"], r["tournamentRank"], rawCatId, baseLiveDir))
+
+        def fetchOneCat(args: Tuple[str, str, str, str, str]) -> Tuple[Tuple[str, str, str, str, str], Optional[Dict[str, Any]]]:
+            tId, dStart, tRank, rawCatId, baseLiveDir = args
+            data = self.fetchMarxCategoryData(baseLiveDir, rawCatId)
+            return (args, data)
+
+        categoriesEnriched = 0
+        marksAddedTotal = 0
+
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            for args, data in executor.map(fetchOneCat, tasks):
+                if not data or not data.get("p"):
+                    continue
+                tId, dStart, tRank, rawCatId, _ = args
+                pCount, mCount = self.saveMarxCategoryPayload(cursor, tId, dStart, tRank, rawCatId, data)
+                if mCount > 0:
+                    categoriesEnriched += 1
+                    marksAddedTotal += mCount
+
+        return {
+            "missingCategoriesChecked": len(tasks),
+            "categoriesEnrichedWithMarks": categoriesEnriched,
+            "marksAddedFromEnrichment": marksAddedTotal,
+        }
+
+    # ==================== STEP 4C: PARSE OFFICIAL *_punkty.pdf CUMULATIVE CLASS POINTS (∑<pts>M<podiums>) ====================
+    def syncOfficialClassPointsFromPunktyPdfs(self, cursor: sqlite3.Cursor, pzstItems: List[Dict[str, Any]], maxPdfsToScan: int = 35) -> int:
+        """
+        First computes classPointsSt/La and classPodiumsSt/La from our official `calculateFtsPoints` formula
+        across all participations, and then scans official `*_punkty.pdf` reports (where PZST prints
+        `<earned>[M1] \\n ∑<totalBefore>M<podiumsBefore>`) to synchronize exact cumulative totals (e.g. ST: C | 159.00M3, LA: C | 157.00M3)!
+        """
+        # 1. Reset and compute baseline cumulative class points & podium credits per couple and style from participations
+        cursor.execute("UPDATE couples SET classPointsSt = NULL, classPodiumsSt = NULL, classPointsLa = NULL, classPodiumsLa = NULL")
+        aggRows = cursor.execute("""
+            SELECT
+                p.coupleKey,
+                cat.style,
+                ROUND(SUM(p.pointsEarned), 2) AS sumClassPts,
+                SUM(p.podiumCredit) AS sumPodiums
+            FROM participations p
+            JOIN categories cat ON cat.categoryId = p.categoryId
+            WHERE p.tournamentId LIKE 'PZST_%'
+            GROUP BY p.coupleKey, cat.style
+        """).fetchall()
+
+        for r in aggRows:
+            cKey = r["coupleKey"]
+            st = r["style"]
+            pts = float(r["sumClassPts"] or 0.0)
+            pod = int(r["sumPodiums"] or 0)
+            if st == "Standard":
+                cursor.execute("""
+                    UPDATE couples SET classPointsSt = ?, classPodiumsSt = ? WHERE coupleKey = ?
+                """, (pts, pod, cKey))
+            elif st == "Latin":
+                cursor.execute("""
+                    UPDATE couples SET classPointsLa = ?, classPodiumsLa = ? WHERE coupleKey = ?
+                """, (pts, pod, cKey))
+
+        # 2. Scan recent official *_punkty.pdf files (with tournament date) for exact ∑<before>M<podiums> + <earned>[M1] records!
+        try:
+            from pypdf import PdfReader
+            import io
+        except ImportError:
+            return len(aggRows)
+
+        pdfTasks: List[Tuple[str, str]] = []
+        seenUrls = set()
+        for item in pzstItems:
+            tDate = str(item.get("dateStart") or "2026-01-01")[:10]
+            for lObj in (item.get("links") or []):
+                u = lObj.get("link") or ""
+                if "punkty.pdf" in u.lower() and u not in seenUrls:
+                    seenUrls.add(u)
+                    pdfTasks.append((tDate, u))
+            if len(pdfTasks) >= maxPdfsToScan:
+                break
+
+        def fetchAndExtractPdfText(task: Tuple[str, str]) -> Tuple[str, str]:
+            tDate, url = task
+            try:
+                resp = self.httpSession.get(url, timeout=8)
+                if resp.status_code == 200 and resp.content.startswith(b"%PDF"):
+                    reader = PdfReader(io.BytesIO(resp.content))
+                    return (tDate, "\n".join((page.extract_text() or "") for page in reader.pages))
+            except Exception:
+                pass
+            return (tDate, "")
+
+        rowPattern = re.compile(
+            r"\b(45\d{6})\s+([A-GS])\s+([^\n]+?)\s+(\d+)(?:\s*(M1))?\s+∑(\d+)M(-?\d+)",
+            re.DOTALL
+        )
+        headerStylePattern = re.compile(r"-\s*(ST|LA)\b|\bOPEN\s+(ST|LA)\b|\bPuchar Polski\s+(ST|LA)\b", re.I)
+
+        # Track the latest PDF snapshot per (starterId, styleCode) -> (pdfDate, dClass, beforePts, beforePod)
+        latestPdfSnapshots: Dict[Tuple[str, str], Tuple[str, str, float, int]] = {}
+        pdfUpdates = 0
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            for tDate, fullText in executor.map(fetchAndExtractPdfText, pdfTasks):
+                if not fullText:
+                    continue
+                lines = fullText.splitlines()
+                currentStyle = "ST"
+                bufferChunk: List[str] = []
+
+                def parseChunk(chunkText: str, styleCode: str) -> None:
+                    nonlocal pdfUpdates
+                    for m in rowPattern.finditer(chunkText):
+                        stId = m.group(1)
+                        dClass = m.group(2)
+                        beforePts = float(m.group(6))
+                        beforePod = max(0, int(m.group(7)))
+                        key = (stId, styleCode)
+                        prev = latestPdfSnapshots.get(key)
+                        if not prev or tDate > prev[0] or (tDate == prev[0] and beforePts > prev[2]):
+                            latestPdfSnapshots[key] = (tDate, dClass, beforePts, beforePod)
+                            pdfUpdates += 1
+
+                for ln in lines:
+                    hm = headerStylePattern.search(ln)
+                    if hm and not re.search(r"\b45\d{6}\b", ln):
+                        if bufferChunk:
+                            parseChunk("\n".join(bufferChunk), currentStyle)
+                            bufferChunk = []
+                        currentStyle = (hm.group(1) or hm.group(2) or hm.group(3) or "ST").upper()
+                    bufferChunk.append(ln)
+                if bufferChunk:
+                    parseChunk("\n".join(bufferChunk), currentStyle)
+
+        # Apply PDF snapshots + any participations STRICTLY AFTER pdfDate (since ∑<total>M<pod> in *_punkty.pdf already includes the PDF's own tournament!)
+        for (stId, styleCode), (pdfDate, dClass, beforePts, beforePod) in latestPdfSnapshots.items():
+            fullStyle = "Standard" if styleCode == "ST" else "Latin"
+            postRow = cursor.execute("""
+                SELECT
+                    COALESCE(SUM(p.pointsEarned), 0.0) AS postPts,
+                    COALESCE(SUM(p.podiumCredit), 0) AS postPod
+                FROM participations p
+                JOIN couples c ON c.coupleKey = p.coupleKey
+                JOIN categories cat ON cat.categoryId = p.categoryId
+                JOIN tournaments t ON t.tournamentId = p.tournamentId
+                WHERE c.starterId = ?
+                  AND cat.style = ?
+                  AND t.dateStart > ?
+                  AND p.tournamentId LIKE 'PZST_%'
+            """, (stId, fullStyle, pdfDate)).fetchone()
+
+            totalPts = round(beforePts + float(postRow["postPts"] if postRow else 0.0), 2)
+            totalPod = beforePod + int(postRow["postPod"] if postRow else 0)
+
+            if styleCode == "ST":
+                cursor.execute("""
+                    UPDATE couples
+                    SET classSt = ?, classPointsSt = ?, classPodiumsSt = ?
+                    WHERE starterId = ?
+                """, (dClass, totalPts, totalPod, stId))
+            else:
+                cursor.execute("""
+                    UPDATE couples
+                    SET classLa = ?, classPointsLa = ?, classPodiumsLa = ?
+                    WHERE starterId = ?
+                """, (dClass, totalPts, totalPod, stId))
+
+        return pdfUpdates
+
     # ==================== STEP 5: LIVE MARX TOURNAMENTS (FULL SKATING & RECALL MARKS) ====================
     def fetchMarxCategoryData(self, baseLiveDir: str, catId: str) -> Optional[Dict[str, Any]]:
         try:
@@ -743,7 +947,6 @@ class BulkFtsLiveIngestor:
         cursor.execute("DELETE FROM judgeMarks WHERE categoryId = ?", (fullCategoryId,))
 
         startNumToCoupleKey: Dict[int, str] = {}
-        rankMult = 1.4 if "Puchar" in tournamentRank or "Mistrzostwa" in tournamentRank else 1.0
         participationsAdded = 0
 
         for idx, pObj in enumerate(validCouples):
@@ -791,7 +994,7 @@ class BulkFtsLiveIngestor:
 
             pRounds = pObj.get("r") or {}
             maxRound = "F" if "F" in pRounds else ("1/2 F" if "r2" in pRounds else "1/4 F")
-            pts, pod = calculateFtsPoints(finalPlace, len(validCouples), rankMult)
+            pts, pod = calculateFtsPoints(finalPlace, len(validCouples), 1.0)
 
             cursor.execute("""
                 INSERT INTO participations (
@@ -899,11 +1102,16 @@ def runCleanEcosystemRebuild(maxLiveTournaments: int = 25) -> Dict[str, Any]:
     liveStats = ingestor.ingestMarxArchiveTournamentsBulk(cursor, pzstItems, maxLiveTournaments=maxLiveTournaments)
     connection.commit()
 
-    print("4/5 Ingesting ALL PZST Ranking leaderboards AND full start histories (/api/ranking/details/...) for every ranked couple...")
+    print("4/6 Ingesting ALL PZST Ranking leaderboards AND full start histories (/api/ranking/details/...) for every ranked couple...")
     rankingDetailsStats = ingestor.ingestPzstRankingsAndFullStartHistories(cursor)
     connection.commit()
 
-    print("5/5 Ingesting ALL historical FTS archive tournaments (2015-2024) and FTS Ranking classifications (2017-2022)...")
+    print("5/6 Fetching detailed MarX JSON marks (Skating + Recall + Judges) for categories discovered in ranking histories...")
+    enrichmentStats = ingestor.ingestMissingMarxCategoryMarksForParticipations(cursor, maxCategoriesToFetch=360)
+    connection.commit()
+
+    print("6/6 Synchronizing official cumulative Class Points (∑Pkt.kl. M<podiums>) from *_punkty.pdf reports and historical FTS archives...")
+    pdfClassPointsUpdates = ingestor.syncOfficialClassPointsFromPunktyPdfs(cursor, pzstItems, maxPdfsToScan=35)
     legacyTours = ingestor.ingestAllLegacyFtsArchiveTournaments(cursor)
     legacyRanks = ingestor.ingestLegacyFtsRankingsAndStarts(cursor)
     connection.commit()
@@ -922,7 +1130,9 @@ def runCleanEcosystemRebuild(maxLiveTournaments: int = 25) -> Dict[str, Any]:
         "judgeMarks": cursor.execute("SELECT COUNT(*) FROM judgeMarks").fetchone()[0],
         **liveStats,
         **rankingDetailsStats,
+        **enrichmentStats,
         **legacyRanks,
+        "pdfClassPointsUpdates": pdfClassPointsUpdates,
         "legacyTournamentsIngested": legacyTours,
     }
     connection.close()

@@ -6,8 +6,6 @@
 
 const CORS_FETCH_STRATEGIES = [
   (url) => url, // 1. Direct fetch (works natively on /cal/archive and /api/ranking/...)
-  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
 ];
 
 async function fetchLiveJsonWithFallback(targetUrl, timeoutMs = 9000) {
